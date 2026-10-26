@@ -6,7 +6,6 @@
   "permissions": [
     "core:default",
     "global-shortcut:default",
-    "single-instance:default",
     "autostart:default",
     "opener:default",
     "log:default"

@@ -45,7 +45,9 @@ impl Serialize for AppError {
             AppError::ElevatedTarget => ("focus.elevated_target", self.to_string()),
             AppError::NoSelection => ("selection.empty", self.to_string()),
             AppError::TooLarge => ("content.too_large", self.to_string()),
-            AppError::HotkeyConflict(key) => ("hotkey.conflict", format!("热键 {} 已被其他程序占用", key)),
+            AppError::HotkeyConflict(key) => {
+                ("hotkey.conflict", format!("热键 {} 已被其他程序占用", key))
+            }
             AppError::HotkeyRegisterFailed => ("hotkey.register_failed", self.to_string()),
             AppError::Storage(_) => ("storage.error", self.to_string()),
             AppError::SettingsInvalid => ("settings.invalid", self.to_string()),

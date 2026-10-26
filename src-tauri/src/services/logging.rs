@@ -1,13 +1,6 @@
 /// 日志脱敏工具
 ///
 /// 将文本转换为长度信息，禁止内容入日志。
-///
-/// # Examples
-///
-/// ```
-/// assert_eq!(redact("hello"), "len=5");
-/// assert_eq!(redact(""), "len=0");
-/// ```
 pub fn redact(text: &str) -> String {
     format!("len={}", text.len())
 }

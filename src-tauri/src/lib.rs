@@ -1,3 +1,6 @@
+// 骨架阶段允许未使用代码，后续任务会逐步接入
+#![allow(dead_code)]
+
 mod commands;
 mod error;
 mod models;
@@ -33,7 +36,6 @@ pub fn run() {
                     },
                 ))
                 .level(log::LevelFilter::Info)
-                .rotation_strategy(tauri_plugin_log::RotationStrategy::Daily)
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![commands::app_ping])

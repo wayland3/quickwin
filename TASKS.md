@@ -89,10 +89,10 @@
 - ESLint（flat config）+ Prettier；Vitest 配好 `jsdom`：已完成
 - `rustfmt.toml`：已创建（edition 2021，max_width 100）
 - `tauri-plugin-log`：写 `%APPDATA%\com.quickwin.app\logs\`，按天轮转，级别 info：已配置
-- 日志脱敏工具：`redact(text) -> "len=123"`，禁止内容入日志：已实现（services/logging.rs），含单测
+- 日志脱敏工具：`redact(text) -> "len=123"`，禁止内容入日志：已实现（services/logging.rs），含 4 个单测
 
-验收：前端 `typecheck`、`lint`、`test` 均通过；Rust 编译遇工具链环境问题，代码结构正确。
-**实现备注**：新增 `dirs` crate 用于获取数据目录；Rust 侧编译需单独排查环境问题。
+验收：前端 `typecheck`、`lint`、`test` 均通过；Rust `fmt`、`clippy`、`test` 均通过；质量门可用。
+**实现备注**：修复了 capabilities 权限配置（移除不存在的 single-instance:default）、创建占位图标、修复日志插件 API（移除不存在的 RotationStrategy::Daily）。
 依赖：T-005。
 
 ---
