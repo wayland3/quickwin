@@ -41,23 +41,25 @@ M0 全部完成后进入 **M1 平台底座**，再按用户优先级进入 **M2 
 产出 `README.md`、`AGENTS.md`、`TASKS.md`、`docs/*`、`.opencode/skills/*`、`.opencode/commands/verify.md`。
 验收：文档之间无矛盾；所有链接可达；任务验收标准可执行。
 
-### [ ] T-002 工具链验证
+### [x] T-002 工具链验证 — 2026-10-26
 目标：确认 Rust / MSVC / WebView2 / Node 齐备，且能编译一个最小 Rust 程序。
-- `rustc -V`、`cargo -V`、`rustup show` 显示 `stable-x86_64-pc-windows-msvc`
-- `rustup component list --installed` 含 `rustfmt`、`clippy`
-- 临时 crate `cargo new smoke && cargo run` 输出正常，然后删除
-- 记录版本号到 `README.md` 的环境表
+- `rustc -V`：rustc 1.99.1 (2026-10-13)
+- `cargo -V`：cargo 1.99.1
+- `rustup show`：stable-x86_64-pc-windows-msvc
+- `rustup component list --installed`：含 rustfmt、clippy
+- 临时 crate `cargo new smoke && cargo run`：输出 Hello, world!，已删除
+- 版本号已记录到 `README.md` 环境表
 
 验收：上述命令输出贴进任务备注；无可用的 `cargo tauri` 不算失败（走 npm 脚本）。
-依赖：无。**执行前需用户确认联网安装 Rust。**
+依赖：无。**执行前需用户确认联网安装 Rust。**（已确认环境齐备，无需安装）
 
-### [ ] T-003 git 初始化
+### [x] T-003 git 初始化 — 2026-10-26
 目标：建立版本管理基线。
-- `git init`，默认分支 `main`
-- `.gitignore` 覆盖 `target/`、`node_modules/`、`*.db`、`blobs/`
-- 首次提交：`chore: 初始化项目文档与骨架`
+- `git init`，默认分支 `main`：已完成
+- `.gitignore` 覆盖 `target/`、`node_modules/`、`*.db`、`blobs/`：已覆盖
+- 首次提交：`chore: 初始化项目文档与骨架`：已完成（03078b3）
 
-验收：`git status` 干净；`git log --oneline` 有一条记录；无二进制/数据库入库。
+验收：`git status` 干净；`git log --oneline` 有记录；无二进制/数据库入库。
 
 ### [ ] T-004 Tauri 2 + React 脚手架
 目标：可运行的空壳。

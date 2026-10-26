@@ -26,13 +26,16 @@ Windows 上的快捷键效率工具，目标是做一个轻量、可自定义、
 
 ## 环境要求
 
-| 依赖 | 说明 |
-|---|---|
-| Windows 10 1809+ / Windows 11 | 主要目标 Windows 11 |
-| WebView2 Runtime | Win11 自带；Win10 需安装 Evergreen Runtime |
-| Node.js ≥ 20（当前验证 24） | 前端构建 |
-| Rust stable（MSVC toolchain） | `winget install Rustlang.Rustup` |
-| MSVC Build Tools | 需勾选「使用 C++ 的桌面开发」 |
+| 依赖 | 版本 | 说明 |
+|---|---|---|
+| Windows 10 1809+ / Windows 11 | 当前 10.0.26200 (Win11 24H2) | 主要目标 Windows 11 |
+| WebView2 Runtime | 155.0.4283.62 | Win11 自带；Win10 需安装 Evergreen Runtime |
+| Node.js | v24.22.1（≥20） | 前端构建 |
+| npm | 11.19.1（≥10） | 包管理 |
+| Rust stable | rustc 1.99.1 (2026-10-13) | `winget install Rustlang.Rustup` |
+| Cargo | 1.99.1 | 随 Rust 安装 |
+| MSVC Build Tools | VS 18 Build Tools | 需勾选「使用 C++ 的桌面开发」 |
+| Git | 2.55.0.windows.3 | 版本管理 |
 
 > PowerShell 默认执行策略会拦截 `npm.ps1`，本项目所有脚本命令统一用 **`npm.cmd`**。
 
