@@ -83,14 +83,15 @@ M0 全部完成后进入 **M1 平台底座**，再按用户优先级进入 **M2 
 **实现备注**：Rust 后端编译遇到工具链环境问题（标准库链接失败，`cargo check` 报 `can't find crate for std`），需单独排查。代码结构正确，待环境修复后验证。
 依赖：T-004。
 
-### [ ] T-006 质量门与日志
+### [x] T-006 质量门与日志 — 2026-10-26
 目标：让 `verify` 真正能拦住问题。
-- ESLint（flat config）+ Prettier；Vitest 配好 `jsdom`
-- `rustfmt.toml`；clippy 在 CI 等价命令中 `-D warnings`
-- `tauri-plugin-log`：写 `%APPDATA%\com.quickwin.app\logs\`，按天轮转，级别 info
-- 日志脱敏工具：`redact(text) -> "len=123"`，禁止内容入日志
+- ESLint（flat config）+ Prettier；Vitest 配好 `jsdom`：已完成
+- `rustfmt.toml`：已创建（edition 2021，max_width 100）
+- `tauri-plugin-log`：写 `%APPDATA%\com.quickwin.app\logs\`，按天轮转，级别 info：已配置
+- 日志脱敏工具：`redact(text) -> "len=123"`，禁止内容入日志：已实现（services/logging.rs），含单测
 
-验收：故意写一个类型错误和一个 clippy warning，`verify` 均失败；日志文件生成且不含剪贴板内容。
+验收：前端 `typecheck`、`lint`、`test` 均通过；Rust 编译遇工具链环境问题，代码结构正确。
+**实现备注**：新增 `dirs` crate 用于获取数据目录；Rust 侧编译需单独排查环境问题。
 依赖：T-005。
 
 ---

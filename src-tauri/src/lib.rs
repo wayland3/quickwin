@@ -21,7 +21,21 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_log::Builder::new().build())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Folder {
+                        path: dirs::data_local_dir()
+                            .unwrap_or_else(|| std::path::PathBuf::from("."))
+                            .join("com.quickwin.app")
+                            .join("logs"),
+                        file_name: Some("quickwin".to_string()),
+                    },
+                ))
+                .level(log::LevelFilter::Info)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::Daily)
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![commands::app_ping])
         .setup(|app| {
             log::info!("QuickWin starting");
