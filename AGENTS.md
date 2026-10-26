@@ -20,6 +20,7 @@ QuickWin 是一个 Windows 常驻的效率工具：`Alt+Space` 启动器、`Alt+
 8. **不修改验收标准**。任务做不完就拆任务或标记阻塞，不准把验收条件改松。
 9. **一次只做一个任务**（`feature-slice` 技能）。禁止顺手重构无关模块。
 10. **所有面向用户的文案用中文**，标识符、命令、日志字段用英文。
+11. **提交前必须交叉模型评审**：凡改动运行时行为的文件（`src/`、`src-tauri/`、`scripts/`、`*.json` / `*.toml` 配置、`capabilities/`），实现完成且 `verify` 全绿后，必须由**另一个模型**（provider 或 model 与实现者不同）按 `docs/` 规格只读复核，结论 PASS 才能提交。评审记录（模型、日期、结论、遗留建议）写入 `TASKS.md` 实现备注。评审 FAIL 或无法执行 → 任务标 `[!]`，禁止提交，禁止以「时间紧」「改动小」为由跳过。纯 Markdown 文档与代码注释的改动可豁免，但汇报时必须写明「纯文档，未评审」。
 
 ## 3. 环境前置
 
@@ -147,6 +148,7 @@ quickwin/
 - [ ] 用户可见文案为中文，错误提示可操作
 - [ ] `TASKS.md` 勾选并写明完成日期；有偏差的写入「实现备注」
 - [ ] 没有把无关改动混进本次提交
+- [ ] 已由另一模型完成交叉评审，结论 PASS，模型与日期记录在 `TASKS.md`
 
 ## 10. 已知限制（不要当 bug 去修）
 
@@ -157,7 +159,7 @@ quickwin/
 
 ## 11. 任务工作流
 
-详见 `feature-slice` 技能。核心循环：**选任务 → 读规格 → 实现+测试 → verify → 回写 TASKS.md → 汇报**。
+详见 `feature-slice` 技能。核心循环：**选任务 → 读规格 → 实现+测试 → verify → 交叉评审 → 回写 TASKS.md → 汇报**。
 
 阻塞时标 `[!]`，写清原因与需要的决策，然后停下来问，不要猜。
 
@@ -197,6 +199,14 @@ test(actions): 补充时间戳边界用例
 
 一次提交只对应一个任务或一个明确的修复。
 
+提交前必须同时满足：`verify` 全绿 + `TASKS.md` 有交叉评审 PASS 记录。提交信息末尾附评审证据（trailer，不影响 Conventional Commits）：
+
+```
+feat(clipboard): 支持图片历史与缩略图
+
+Reviewed-by: joyparty-openai-compatible/coding-ali/qwen3.7-plus (PASS)
+```
+
 ## 15. 术语表
 
 | 术语 | 定义 |
@@ -208,6 +218,7 @@ test(actions): 补充时间戳边界用例
 | 保留策略 | TTL + 条数/容量上限 + 清理时机的组合（见 T-206） |
 | frecency | frequency + recency，综合使用次数与最近使用时间的排序指标 |
 | 质量门 | `npm.cmd run verify`，包含 typecheck + lint + test + rustfmt + clippy + rust test |
+| 交叉评审 | 由非实现模型按规格只读复核代码，产出 PASS/FAIL 结论，是提交门禁 |
 | 脱敏 | 日志/导出中只保留 id、类型、长度，不保留内容（见 §13 日志与隐私） |
 | 单入口 | 剪贴板走 `platform/clipboard`，热键走 `services/hotkey`，禁止业务代码直接调用 |
 | DoD | Definition of Done，定义完成清单（见 §9） |
@@ -225,6 +236,7 @@ test(actions): 补充时间戳边界用例
 | 改热键默认值 | ❌ 需用户确认 |
 | 改数据库 schema | ❌ 需新增 migration + 迁移测试 + 用户确认 |
 | 删除或后置任务 | ❌ 只能标 `[-]` 并说明理由，不能直接删除 |
+| 跳过或放宽交叉评审门禁 | ❌ 需用户明确同意 |
 | 执行系统级操作（winget / 注册表 / 执行策略） | ❌ 需用户明确确认（见 §13） |
 
 **原则**：实现层自由，架构层谨慎，用户可见行为不可擅自变更。

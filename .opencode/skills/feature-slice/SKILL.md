@@ -90,7 +90,35 @@ npm.cmd run verify
 结果：记事本/VS Code/Chrome 粘贴通过；管理员窗口提示正确
 ```
 
-### 6. 回写进度
+### 6. 交叉模型评审（提交门禁）
+
+**触发**：改动运行时行为即必须做（见 `AGENTS.md` §2 #11）。纯文档/注释改动跳过，但汇报里要写明豁免理由。
+
+**材料**（只给事实，不给你的结论）：
+
+- 任务 ID + 验收标准原文（从 `TASKS.md` 复制，不要转述）
+- `git diff`（或改动文件清单 + 完整文件内容，未初始化 git 时用后者）
+- `npm.cmd run verify` 的分项结果
+- 相关规格章节：`docs/PRD.md` / `ARCHITECTURE.md` / `WIN32-NOTES.md` / `UI-SPEC.md`
+
+禁止把「我觉得这样最合理」「已验证没问题」写进给评审模型的输入——会污染判断。
+
+**执行**：用 `subagent`，`agent: general`，`model: joyparty-openai-compatible/coding-ali/qwen3.7-plus`，提示词按 `.opencode/commands/cross-review.md`。评审者只读，不得改文件、不得执行修改性命令。
+
+**结论处理**：
+
+- `PASS` → 进入第 7 步。
+- `FAIL` → 按阻断项修复，重新 `verify` + 重评，最多 2 轮；第 2 轮仍 `FAIL` → 标 `[!]` 并问用户。
+- 模型报错/超时 → 标 `[!]`，写「交叉评审未执行」，不得静默放行。
+
+**记录**（写进 `TASKS.md` 该任务下）：
+
+```
+交叉评审：joyparty-openai-compatible/coding-ali/qwen3.7-plus（2026-10-26）PASS
+遗留建议：retention 清理失败未重试，已入需求池
+```
+
+### 7. 回写进度
 
 更新 `TASKS.md`：
 
@@ -98,7 +126,7 @@ npm.cmd run verify
 - 有偏差时加「实现备注」：为什么偏离、留下了什么。
 - 发现后续工作 → 加到「需求池」，不塞进当前任务。
 
-### 7. 汇报
+### 8. 汇报
 
 ```
 完成 T-206（2026-10-26）
