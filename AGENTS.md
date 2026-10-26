@@ -20,7 +20,7 @@ QuickWin 是一个 Windows 常驻的效率工具：`Alt+Space` 启动器、`Alt+
 8. **不修改验收标准**。任务做不完就拆任务或标记阻塞，不准把验收条件改松。
 9. **一次只做一个任务**（`feature-slice` 技能）。禁止顺手重构无关模块。
 10. **所有面向用户的文案用中文**，标识符、命令、日志字段用英文。
-11. **提交前必须交叉模型评审**：凡改动运行时行为的文件（`src/`、`src-tauri/`、`scripts/`、`*.json` / `*.toml` 配置、`capabilities/`），实现完成且 `verify` 全绿后，必须由**另一个模型**（provider 或 model 与实现者不同）按 `docs/` 规格只读复核，结论 PASS 才能提交。评审记录（模型、日期、结论、遗留建议）写入 `TASKS.md` 实现备注。评审 FAIL 或无法执行 → 任务标 `[!]`，禁止提交，禁止以「时间紧」「改动小」为由跳过。纯 Markdown 文档与代码注释的改动可豁免，但汇报时必须写明「纯文档，未评审」。
+11. **提交前必须交叉模型评审**：凡改动运行时行为的文件（`src/`、`src-tauri/`、`scripts/`、`*.json` / `*.toml` 配置、`capabilities/`），实现完成且 `verify` 全绿后，必须由**另一个模型**（provider 或 model 与实现者不同）按 `docs/` 规格只读复核，结论 PASS 才能提交。评审记录（模型、日期、结论、遗留建议）写入 `docs/reviews/T-<id>.md`，并在 `TASKS.md` 实现备注中引用。评审 FAIL 或无法执行 → 任务标 `[!]`，禁止提交，禁止以「时间紧」「改动小」为由跳过。纯 Markdown 文档与代码注释的改动可豁免，但汇报时必须写明「纯文档，未评审」。
 
 ## 3. 环境前置
 
@@ -34,6 +34,8 @@ QuickWin 是一个 Windows 常驻的效率工具：`Alt+Space` 启动器、`Alt+
 | WebView2 | Evergreen Runtime             | 注册表或 `C:\Program Files (x86)\Microsoft\EdgeWebView`               |
 
 **PowerShell 陷阱**：`npm` / `npx` / `pnpm` 的 `.ps1` shim 会被执行策略拦截（`UnauthorizedAccess`）。一律使用 `npm.cmd`、`npx.cmd`，或在文档中提示用户执行 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`。不要为了让 `npm` 能跑而擅自改系统策略。
+
+**环境自检**：运行 `scripts/check-env.ps1` 一键检查所有依赖。
 
 ## 4. 常用命令
 
@@ -63,7 +65,8 @@ QuickWin 是一个 Windows 常驻的效率工具：`Alt+Space` 启动器、`Alt+
 quickwin/
 ├── AGENTS.md                  # 本文件
 ├── TASKS.md                   # 任务与进度（唯一进度源）
-├── docs/                      # 规格、架构、平台笔记、UI、ADR
+├── docs/                      # 规格、架构、编码规范、平台笔记、UI、ADR
+├── scripts/                   # 环境检查等脚本
 ├── .opencode/skills/          # feature-slice / tauri-win32 / release-check
 ├── .opencode/commands/verify.md
 ├── src/                       # React 渲染层
@@ -90,53 +93,7 @@ quickwin/
 
 依赖方向：`commands → services → platform`；`actions` 为纯函数模块，可被 `services` 调用，不得反向依赖 `platform`。循环依赖一律视为设计错误。
 
-## 6. 编码规范
-
-### Rust
-
-- Edition 2021，`rustfmt` 默认配置；`clippy -D warnings` 必须通过。
-- 错误：`thiserror` 定义 `AppError`，对前端暴露稳定的 `code`（如 `clipboard.open_failed`）+ 中文 `message`；不把 Win32 HRESULT 直接抛给 UI。
-- 异步：Tauri command 用 `async fn`，但**禁止在 `async` 中做阻塞 Win32 调用或长事务**；阻塞工作丢到 `spawn_blocking` 或专用线程。
-- SQLite：单写线程 + `tokio::sync::mpsc`；读用短连接或连接池。任何 `await` 期间不得持有数据库锁或已打开的剪贴板句柄。
-- `unsafe`：只允许在 `platform/` 内，且每个 `unsafe` 块上方写 `// SAFETY:` 说明前置条件与生命周期。
-- 资源：HWND/HANDLE/`GlobalLock` 用 RAII 守卫封装，禁止裸 `let h = OpenClipboard(...)` 后分支提前 return。
-
-### TypeScript / React
-
-- `strict: true`，禁止 `any`（确需时用 `unknown` + 类型守卫）。
-- 组件只负责渲染与交互，派生逻辑放 `lib/`，纯函数必须有测试。
-- 所有 `invoke` 走 `lib/ipc.ts`，入参/返回值类型与 Rust `models.rs` 手工对齐；字段变更必须同步两侧并更新测试。
-- 不引入 UI 组件库（Tailwind + 自建组件），保证浮层体积与启动速度。
-
-### 命名与文案
-
-- 任务 ID：`T-<里程碑><序号>`，如 `T-206`。
-- Command：`snake_case`（`clipboard_list`）；事件：`domain://event`（`clipboard://changed`）。
-- 数据库表：`snake_case` 单数（`clipboard_item`）。
-- 面向用户：简体中文，不使用「您」；按钮动词开头（「粘贴」「删除」）。
-
-## 7. 数据与迁移
-
-- 库文件：`%APPDATA%\com.quickwin.app\quickwin.db`；附件：`blobs\<xx>\<hash>.<ext>`。
-- `PRAGMA journal_mode=WAL`、`synchronous=NORMAL`、`busy_timeout=5000`、`foreign_keys=ON`。
-- 版本：`PRAGMA user_version`，迁移函数数组顺序执行，单次迁移必须在事务内。
-- 迁移测试：内置 v1 空库 fixture；后续每个版本补一条「vN 数据 → 最新」测试。
-- 时间统一存 Unix 毫秒（`INTEGER`）；展示层再做本地化。
-- 删除类操作（清空历史、删除条目）必须同步清理 FTS 行与 blob 文件。
-
-## 8. 测试要求
-
-| 层                            | 要求                                                                          |
-|-------------------------------|-------------------------------------------------------------------------------|
-| `actions/`（检测与转换）      | **必须**单测，覆盖 PRD 中的判定表，含边界与误判用例                           |
-| `services/ranking`、`storage` | 必须单测（内存 SQLite）                                                       |
-| `platform/`                   | 不做自动化 UI 测试，按 `docs/WIN32-NOTES.md` 手动清单验证，并在任务里记录结果 |
-| 前端 `lib/`                   | 必须单测；组件只测关键交互（键盘导航、空态）                                  |
-| 迁移                          | 每个 schema 版本一条                                                          |
-
-测试命名用中文描述行为，例如 `fn 十位数字超出合理区间时不应识别为时间戳()`。
-
-## 9. 定义完成（DoD）
+## 6. 定义完成（DoD）
 
 一个任务只有同时满足以下条件才算完成：
 
@@ -148,36 +105,37 @@ quickwin/
 - [ ] 用户可见文案为中文，错误提示可操作
 - [ ] `TASKS.md` 勾选并写明完成日期；有偏差的写入「实现备注」
 - [ ] 没有把无关改动混进本次提交
-- [ ] 已由另一模型完成交叉评审，结论 PASS，模型与日期记录在 `TASKS.md`
+- [ ] 已由另一模型完成交叉评审，结论 PASS，评审记录在 `docs/reviews/T-<id>.md`
 
-## 10. 已知限制（不要当 bug 去修）
+## 7. 已知限制（不要当 bug 去修）
 
 1. **UIPI**：无法向管理员权限窗口发送输入，也无法从其取词。只能提示用户「目标窗口权限较高」。
 2. **热键占用**：`Alt+Space` 可能被 PowerToys Run / 输入法占用。处理方式是可检测、可换绑、有提示，而不是换用更底层的键盘钩子（v1 不做）。
 3. **剪贴板富格式保真**：跨应用还原 HTML/RTF 时格式可能丢失；v1 只保证文本、图片、文件列表可用。
 4. **首次构建慢**：`rusqlite` bundled 首次编译 30–60s，属正常现象。
 
-## 11. 任务工作流
+## 8. 任务工作流
 
 详见 `feature-slice` 技能。核心循环：**选任务 → 读规格 → 实现+测试 → verify → 交叉评审 → 回写 TASKS.md → 汇报**。
 
 阻塞时标 `[!]`，写清原因与需要的决策，然后停下来问，不要猜。
 
-## 12. 文档地图
+## 9. 文档地图
 
-| 想知道                     | 看                     | 何时必读                     |
-|----------------------------|------------------------|------------------------------|
-| 这个功能到底要什么行为     | `docs/PRD.md`          | 实现该功能前                 |
-| 模块怎么分层、IPC 与表结构 | `docs/ARCHITECTURE.md` | 首次进入项目 + 改架构时      |
-| Win32 怎么写、有哪些坑     | `docs/WIN32-NOTES.md`  | 碰 `platform/` 前            |
-| 浮层长什么样、键盘怎么走   | `docs/UI-SPEC.md`      | 做 UI 前                     |
-| 为什么这么选               | `docs/DECISIONS.md`    | 新增依赖 / 改架构前          |
-| 错误码与用户提示           | `docs/ARCHITECTURE.md` §12 | 新增错误处理时           |
-| 现在做到哪了               | `TASKS.md`             | 每次会话开始                 |
+| 想知道                     | 看                         | 何时必读                     |
+|----------------------------|----------------------------|------------------------------|
+| 这个功能到底要什么行为     | `docs/PRD.md`              | 实现该功能前                 |
+| 模块怎么分层、IPC 与表结构 | `docs/ARCHITECTURE.md`     | 首次进入项目 + 改架构时      |
+| 编码规范与示例             | `docs/CODING-STANDARDS.md` | **写代码前**                 |
+| Win32 怎么写、有哪些坑     | `docs/WIN32-NOTES.md`      | 碰 `platform/` 前            |
+| 浮层长什么样、键盘怎么走   | `docs/UI-SPEC.md`          | 做 UI 前                     |
+| 为什么这么选               | `docs/DECISIONS.md`        | 新增依赖 / 改架构前          |
+| 错误码与用户提示           | `docs/ARCHITECTURE.md` §12 | 新增错误处理时               |
+| 现在做到哪了               | `TASKS.md`                 | 每次会话开始                 |
 
 **上下文预算**：不要一次全读。只读当前任务相关的章节，feature-slice 技能第 2 步有具体指引。
 
-## 13. 禁止事项
+## 10. 禁止事项
 
 - 禁止把剪贴板内容、窗口标题、文件路径写进日志或错误上报。
 - 禁止在未确认的情况下执行 `winget install`、修改系统执行策略、写注册表启动项（自启必须走 Tauri autostart 插件）。
@@ -186,7 +144,7 @@ quickwin/
 - 禁止提交 `quickwin.db`、`blobs/`、`target/`、`node_modules/`。
 - 禁止在没有 migration 的情况下手工改用户库。
 
-## 14. 提交规范
+## 11. 提交规范
 
 Conventional Commits，type 用英文，subject 用中文：
 
@@ -199,15 +157,15 @@ test(actions): 补充时间戳边界用例
 
 一次提交只对应一个任务或一个明确的修复。
 
-提交前必须同时满足：`verify` 全绿 + `TASKS.md` 有交叉评审 PASS 记录。提交信息末尾附评审证据（trailer，不影响 Conventional Commits）：
+提交前必须同时满足：`verify` 全绿 + `docs/reviews/T-<id>.md` 有交叉评审 PASS 记录。提交信息末尾附评审证据（trailer，不影响 Conventional Commits）：
 
 ```
 feat(clipboard): 支持图片历史与缩略图
 
-Reviewed-by: joyparty-openai-compatible/coding-ali/qwen3.7-plus (PASS)
+Reviewed-by: GLM5.3 (PASS)
 ```
 
-## 15. 术语表
+## 12. 术语表
 
 | 术语 | 定义 |
 |------|------|
@@ -219,11 +177,11 @@ Reviewed-by: joyparty-openai-compatible/coding-ali/qwen3.7-plus (PASS)
 | frecency | frequency + recency，综合使用次数与最近使用时间的排序指标 |
 | 质量门 | `npm.cmd run verify`，包含 typecheck + lint + test + rustfmt + clippy + rust test |
 | 交叉评审 | 由非实现模型按规格只读复核代码，产出 PASS/FAIL 结论，是提交门禁 |
-| 脱敏 | 日志/导出中只保留 id、类型、长度，不保留内容（见 §13 日志与隐私） |
+| 脱敏 | 日志/导出中只保留 id、类型、长度，不保留内容（见 §10 禁止事项） |
 | 单入口 | 剪贴板走 `platform/clipboard`，热键走 `services/hotkey`，禁止业务代码直接调用 |
-| DoD | Definition of Done，定义完成清单（见 §9） |
+| DoD | Definition of Done，定义完成清单（见 §6） |
 
-## 16. 决策权限
+## 13. 决策权限
 
 | 事项 | AI 可自主决定？ |
 |------|----------------|
@@ -237,58 +195,6 @@ Reviewed-by: joyparty-openai-compatible/coding-ali/qwen3.7-plus (PASS)
 | 改数据库 schema | ❌ 需新增 migration + 迁移测试 + 用户确认 |
 | 删除或后置任务 | ❌ 只能标 `[-]` 并说明理由，不能直接删除 |
 | 跳过或放宽交叉评审门禁 | ❌ 需用户明确同意 |
-| 执行系统级操作（winget / 注册表 / 执行策略） | ❌ 需用户明确确认（见 §13） |
+| 执行系统级操作（winget / 注册表 / 执行策略） | ❌ 需用户明确确认（见 §10） |
 
 **原则**：实现层自由，架构层谨慎，用户可见行为不可擅自变更。
-
-## 17. 代码示例
-
-### Rust 错误处理
-
-❌ 坏：
-```rust
-let item = db.get(id).unwrap(); // 生产代码禁止
-```
-
-✅ 好：
-```rust
-let item = db.get(id).ok_or(AppError::Storage(rusqlite::Error::QueryReturnedNoRows))?;
-```
-
-### Rust unsafe 块
-
-❌ 坏：
-```rust
-unsafe { ShowWindow(hwnd, SW_SHOW); } // 缺少 SAFETY 注释
-```
-
-✅ 好：
-```rust
-// SAFETY: hwnd 来自 GetForegroundWindow，已在上一行判空；
-// 调用期间窗口句柄不会被本模块销毁。
-unsafe { ShowWindow(hwnd, SW_SHOW) };
-```
-
-### TypeScript 类型
-
-❌ 坏：
-```ts
-const data: any = await invoke('clipboard_get', { id }); // 禁止 any
-```
-
-✅ 好：
-```ts
-const data: ClipboardDetail = await ipc.clipboardGet(id); // 走 ipc.ts，带类型
-```
-
-### 日志脱敏
-
-❌ 坏：
-```rust
-log::debug!("clipboard content: {}", text); // 禁止记录内容
-```
-
-✅ 好：
-```rust
-log::debug!("clipboard captured: id={}, kind={}, len={}", id, kind, text.len());
-```

@@ -237,6 +237,13 @@ WHERE pinned = 0 AND last_copied_at < ?1;
 - 每条迁移必须配测试：用旧版 schema + 样本数据 → 迁移 → 断言版本与数据。
 - 禁止修改已发布的迁移函数。
 
+### 5.5 数据管理
+
+- 库文件：`%APPDATA%\com.quickwin.app\quickwin.db`；附件：`blobs\<xx>\<hash>.<ext>`。
+- 时间统一存 Unix 毫秒（`INTEGER`）；展示层再做本地化。
+- 删除类操作（清空历史、删除条目）必须同步清理 FTS 行与 blob 文件。
+- 迁移测试：内置 v1 空库 fixture；后续每个版本补一条「vN 数据 → 最新」测试。
+
 ## 6. IPC 契约
 
 ### 6.1 命令
@@ -516,6 +523,9 @@ pub enum AppError {
 | IPC 契约 | 快照测试 | Rust 序列化字段集合 == TS 类型字段集合 |
 | 前端 `lib/` | vitest | 键盘导航、过滤、错误映射 |
 | `platform/` | 手动清单 | 见 `WIN32-NOTES.md` 第 10 节 |
+| 迁移 | 每个 schema 版本一条 | 旧库 → 新库数据完整性 |
+
+**测试命名**：用中文描述行为，例如 `fn 十位数字超出合理区间时不应识别为时间戳()`。
 
 ## 16. 目录与命名
 

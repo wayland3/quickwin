@@ -32,7 +32,75 @@ description: 按 TASKS.md 认领并完成 QuickWin 的单个任务（含读规�
 
 ## 流程
 
-### 1. 声明计划（先说话再动手）
+### 1. 判断任务复杂度
+
+检查 `TASKS.md` 中任务条目是否标记为 `[complex]`：
+
+- **未标记**：普通任务，直接进入第 2 步。
+- **标记 `[complex]`**：复杂任务，必须先写 mini-design，通过评审后才能实现（见第 1.5 步）。
+
+### 1.5 复杂任务：mini-design（仅 `[complex]` 任务）
+
+**目的**：在动手前理清思路，暴露风险，避免返工。
+
+**mini-design 模板**（3-5 行，写到 `docs/reviews/T-<id>-design.md`）：
+
+```markdown
+# T-<id> mini-design
+
+## 改动文件
+- `src-tauri/src/services/xxx.rs`（新增）
+- `src-tauri/src/commands/xxx.rs`（修改）
+
+## 模块交互
+```
+commands::xxx → services::xxx → platform::xxx
+```
+
+## 错误处理
+- 场景 1：xxx → 返回 `AppError::Xxx`，前端显示"xxx"
+- 场景 2：xxx → 降级为 xxx
+
+## 测试策略
+- 单测：覆盖 xxx 场景
+- 手测：xxx 应用，验证 xxx 行为
+```
+
+**评审流程**：
+
+1. 用 `subagent` 调用评审模型（GLM5.3 或 kimi-3.1），提示词：
+
+```
+你是 QuickWin 的设计评审员。请审查以下 mini-design，指出 3 个最大风险，并给出改进建议。
+
+任务：T-<id> <任务名称>
+验收标准：<从 TASKS.md 复制>
+
+mini-design：
+<粘贴 mini-design 内容>
+
+输出格式：
+1. **风险标题**
+   - 问题：xxx
+   - 建议：xxx
+
+2. ...
+
+3. ...
+
+结论：PASS / FAIL（附条件）
+```
+
+2. 评审结论处理：
+   - `PASS` → 继续实现，按评审建议调整设计。
+   - `FAIL` → 修改 mini-design，重新评审（最多 2 轮）。第 2 轮仍 FAIL → 标 `[!]` 并问用户。
+
+3. 评审记录写入 `docs/reviews/T-<id>-design.md`，包含：
+   - 评审模型、日期、结论
+   - 3 个风险与处理
+   - 遗留建议
+
+### 2. 声明计划（先说话再动手）
 
 一句话说明：
 
@@ -44,7 +112,7 @@ description: 按 TASKS.md 认领并完成 QuickWin 的单个任务（含读规�
 
 如果发现验收标准有歧义，先问，不要猜。
 
-### 2. 读规格
+### 3. 读规格
 
 只读该任务相关的章节，避免把整份 PRD 塞进上下文。读完后确认三个东西：
 
@@ -52,14 +120,14 @@ description: 按 TASKS.md 认领并完成 QuickWin 的单个任务（含读规�
 - 边界（空、超长、失败、权限）
 - 验收（如何证明做完了）
 
-### 3. 实现最小切片
+### 4. 实现最小切片
 
 - 只改任务需要的文件；顺手发现的问题记到 `TASKS.md` 需求池，不现场修。
 - 先写核心纯函数 + 测试，再接 UI/IPC。
 - 涉及 Win32 时加载 `tauri-win32` 技能，严格按其中的模板与清单。
 - 不新增依赖；确需新增时先在 `docs/DECISIONS.md` 写 ADR 并告知用户。
 
-### 4. 写测试
+### 5. 写测试
 
 | 改动类型 | 必须补的测试 |
 |---|---|
@@ -71,7 +139,7 @@ description: 按 TASKS.md 认领并完成 QuickWin 的单个任务（含读规�
 
 测试名用中文描述行为。
 
-### 5. 验证
+### 6. 验证
 
 ```powershell
 npm.cmd run verify
@@ -90,7 +158,7 @@ npm.cmd run verify
 结果：记事本/VS Code/Chrome 粘贴通过；管理员窗口提示正确
 ```
 
-### 6. 交叉模型评审（提交门禁）
+### 7. 交叉模型评审（提交门禁）
 
 **触发**：改动运行时行为即必须做（见 `AGENTS.md` §2 #11）。纯文档/注释改动跳过，但汇报里要写明豁免理由。
 
@@ -100,25 +168,77 @@ npm.cmd run verify
 - `git diff`（或改动文件清单 + 完整文件内容，未初始化 git 时用后者）
 - `npm.cmd run verify` 的分项结果
 - 相关规格章节：`docs/PRD.md` / `ARCHITECTURE.md` / `WIN32-NOTES.md` / `UI-SPEC.md`
+- 如果是 `[complex]` 任务，附上 mini-design 评审记录 `docs/reviews/T-<id>-design.md`
 
 禁止把「我觉得这样最合理」「已验证没问题」写进给评审模型的输入——会污染判断。
 
-**执行**：用 `subagent`，`agent: general`，`model: joyparty-openai-compatible/coding-ali/qwen3.7-plus`，提示词按 `.opencode/commands/cross-review.md`。评审者只读，不得改文件、不得执行修改性命令。
+**执行**：用 `subagent`，`agent: general`，`model: zai-org/glm-5` 或 `moonshot/kimi-k3`（二选一，与实现模型不同），提示词：
+
+```
+你是 QuickWin 的代码评审员。请审查以下实现，指出 3 个最大风险，并给出改进建议。
+
+任务：T-<id> <任务名称>
+验收标准：<从 TASKS.md 复制>
+
+改动：
+<粘贴 git diff 或文件内容>
+
+verify 结果：
+<粘贴 verify 输出>
+
+输出格式：
+1. **风险标题**
+   - 问题：xxx
+   - 建议：xxx
+
+2. ...
+
+3. ...
+
+结论：PASS / FAIL（附条件）
+```
+
+评审者只读，不得改文件、不得执行修改性命令。
 
 **结论处理**：
 
-- `PASS` → 进入第 7 步。
+- `PASS` → 进入第 8 步。
 - `FAIL` → 按阻断项修复，重新 `verify` + 重评，最多 2 轮；第 2 轮仍 `FAIL` → 标 `[!]` 并问用户。
 - 模型报错/超时 → 标 `[!]`，写「交叉评审未执行」，不得静默放行。
 
-**记录**（写进 `TASKS.md` 该任务下）：
+**记录**（写入 `docs/reviews/T-<id>.md`）：
+
+```markdown
+# T-<id> <任务名称>
+
+**实现模型**：qwen3.7-plus
+**评审模型**：GLM5.3 / kimi-3.1
+**评审日期**：2026-10-26
+**结论**：PASS（附条件）
+
+## 风险与处理
+
+1. **风险标题**
+   - 问题：xxx
+   - 处理：xxx（已修复 / 接受风险 / 记录到需求池）
+   - 验证：xxx
+
+2. ...
+
+3. ...
+
+## 遗留建议
+
+- xxx
+```
+
+同时在 `TASKS.md` 该任务下记录：
 
 ```
-交叉评审：joyparty-openai-compatible/coding-ali/qwen3.7-plus（2026-10-26）PASS
-遗留建议：retention 清理失败未重试，已入需求池
+交叉评审：GLM5.3（2026-10-26）PASS，详见 docs/reviews/T-<id>.md
 ```
 
-### 7. 回写进度
+### 8. 回写进度
 
 更新 `TASKS.md`：
 
@@ -126,12 +246,13 @@ npm.cmd run verify
 - 有偏差时加「实现备注」：为什么偏离、留下了什么。
 - 发现后续工作 → 加到「需求池」，不塞进当前任务。
 
-### 8. 汇报
+### 9. 汇报
 
 ```
 完成 T-206（2026-10-26）
 改动：3 个文件（列路径）
 验证：verify 绿；cargo test 12 项；手测 4 项
+交叉评审：GLM5.3 PASS，详见 docs/reviews/T-206.md
 遗留：blob 回收在 Windows 文件锁下偶发失败，已记录到需求池
 下一步建议：T-207 排除应用
 ```
