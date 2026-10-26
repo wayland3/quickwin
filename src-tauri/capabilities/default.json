@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "默认权限集",
+  "windows": ["overlay"],
+  "permissions": [
+    "core:default",
+    "global-shortcut:default",
+    "single-instance:default",
+    "autostart:default",
+    "opener:default",
+    "log:default"
+  ]
+}

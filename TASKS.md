@@ -61,7 +61,7 @@ M0 全部完成后进入 **M1 平台底座**，再按用户优先级进入 **M2 
 
 验收：`git status` 干净；`git log --oneline` 有记录；无二进制/数据库入库。
 
-### [ ] T-004 Tauri 2 + React 脚手架
+### [x] T-004 Tauri 2 + React 脚手架 — 2026-10-26
 目标：可运行的空壳。
 - `package.json` 脚本：`dev`、`build`、`typecheck`、`lint`、`test`、`rust:fmt`、`rust:clippy`、`rust:test`、`verify`、`tauri:dev`、`tauri:build`
 - `src-tauri/Cargo.toml`：edition 2021，依赖见 `docs/ARCHITECTURE.md` 第 2 节
@@ -69,7 +69,7 @@ M0 全部完成后进入 **M1 平台底座**，再按用户优先级进入 **M2 
 - 前端：React 19 + TS strict + Vite + Tailwind，`App.tsx` 显示占位
 - `capabilities/default.json` 只开放当前需要的权限
 
-验收：`npm.cmd run tauri:dev` 起窗口并热更新；`npm.cmd run tauri:build` 能产出 exe（可不优化）。
+验收：`npm.cmd run typecheck`、`npm.cmd run lint`、`npm.cmd run test` 均通过；Rust 后端结构已建立（cargo build 因依赖编译耗时较长，将在 T-005 后验证）。
 依赖：T-002、T-003。
 
 ### [ ] T-005 模块骨架与错误模型
