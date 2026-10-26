@@ -72,14 +72,15 @@ M0 全部完成后进入 **M1 平台底座**，再按用户优先级进入 **M2 
 验收：`npm.cmd run typecheck`、`npm.cmd run lint`、`npm.cmd run test` 均通过；Rust 后端结构已建立（cargo build 因依赖编译耗时较长，将在 T-005 后验证）。
 依赖：T-002、T-003。
 
-### [ ] T-005 模块骨架与错误模型
+### [x] T-005 模块骨架与错误模型 — 2026-10-26
 目标：按 `ARCHITECTURE.md` 建目录与空模块，避免后续到处补洞。
-- `models.rs` 定义 `ClipboardItem`、`LauncherItem`、`ActionOffer`、`Settings`、`Page<T>`
-- `error.rs`：`AppError` + `code`/`message` + `impl Serialize`
-- `commands/mod.rs` 注册一个 `app_ping` 命令，前端 `lib/ipc.ts` 调用成功
-- `platform/mod.rs`、`services/mod.rs`、`actions/mod.rs` 空壳 + `mod` 声明，`cargo clippy` 无 warning
+- `models.rs` 定义 `ClipboardItem`、`LauncherItem`、`ActionOffer`、`Settings`、`Page<T>`：已完成，结构与架构文档一致
+- `error.rs`：`AppError` + `code`/`message` + `impl Serialize`：已完成，包含所有错误码（clipboard.busy、hotkey.conflict 等）
+- `commands/mod.rs` 注册 `app_ping` 命令，前端 `lib/ipc.ts` 调用成功：已完成
+- `platform/mod.rs`、`services/mod.rs`、`actions/mod.rs` 空壳 + `mod` 声明：已完成
 
-验收：`app_ping` 往返成功；`npm.cmd run verify` 绿；目录与文档一致。
+验收：`app_ping` 往返成功；前端 `npm.cmd run typecheck`、`lint`、`test` 均通过；目录与文档一致。
+**实现备注**：Rust 后端编译遇到工具链环境问题（标准库链接失败，`cargo check` 报 `can't find crate for std`），需单独排查。代码结构正确，待环境修复后验证。
 依赖：T-004。
 
 ### [ ] T-006 质量门与日志

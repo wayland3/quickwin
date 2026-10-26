@@ -1,9 +1,36 @@
-use thiserror::Error;
 use serde::Serialize;
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AppError {
-    #[error("内部错误: {0}")]
+    #[error("剪贴板暂时被占用，请稍后重试")]
+    ClipboardBusy,
+
+    #[error("无法读取剪贴板内容")]
+    ClipboardRead,
+
+    #[error("目标窗口权限较高，无法自动操作")]
+    ElevatedTarget,
+
+    #[error("未检测到选中文本")]
+    NoSelection,
+
+    #[error("内容过长（超过 256KB）")]
+    TooLarge,
+
+    #[error("热键 {0} 已被其他程序占用")]
+    HotkeyConflict(String),
+
+    #[error("热键注册失败，请尝试更换")]
+    HotkeyRegisterFailed,
+
+    #[error("数据库操作失败")]
+    Storage(String),
+
+    #[error("设置值不合法，已恢复默认")]
+    SettingsInvalid,
+
+    #[error("发生内部错误，请查看日志")]
     Internal(String),
 }
 
@@ -12,6 +39,23 @@ impl Serialize for AppError {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(&self.to_string())
+        let (code, message) = match self {
+            AppError::ClipboardBusy => ("clipboard.busy", self.to_string()),
+            AppError::ClipboardRead => ("clipboard.read_failed", self.to_string()),
+            AppError::ElevatedTarget => ("focus.elevated_target", self.to_string()),
+            AppError::NoSelection => ("selection.empty", self.to_string()),
+            AppError::TooLarge => ("content.too_large", self.to_string()),
+            AppError::HotkeyConflict(key) => ("hotkey.conflict", format!("热键 {} 已被其他程序占用", key)),
+            AppError::HotkeyRegisterFailed => ("hotkey.register_failed", self.to_string()),
+            AppError::Storage(_) => ("storage.error", self.to_string()),
+            AppError::SettingsInvalid => ("settings.invalid", self.to_string()),
+            AppError::Internal(_) => ("internal", self.to_string()),
+        };
+
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("AppError", 2)?;
+        state.serialize_field("code", code)?;
+        state.serialize_field("message", &message)?;
+        state.end()
     }
 }
