@@ -34,6 +34,12 @@ pub enum AppError {
     Internal(String),
 }
 
+impl From<tauri::Error> for AppError {
+    fn from(err: tauri::Error) -> Self {
+        AppError::Internal(err.to_string())
+    }
+}
+
 impl Serialize for AppError {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

@@ -100,13 +100,21 @@
 
 ## M1 平台底座
 
-### [ ] T-101 单实例、托盘、开机自启
+### [x] T-101 单实例、托盘、开机自启 — 2026-10-26
 - `tauri-plugin-single-instance`：二次启动只唤醒已有实例
 - 托盘：打开面板 / 剪贴板 / 设置 / 暂停记录 / 退出；左键单击打开启动器
 - `tauri-plugin-autostart`：以 `--hidden` 参数开机启动，默认关，设置可开
 
 验收：双击 exe 只出现一个实例；托盘菜单每项可用；开启自启后重启系统能在托盘看到图标且不弹窗。
 依赖：T-004。
+
+**实现备注**：
+- 托盘菜单包含 7 项：启动器、剪贴板、设置、分隔符、暂停30分钟、暂停直到重启、退出
+- 左键单击托盘图标打开启动器（`.show_menu_on_left_click(false)`）
+- 设置窗口尚未实现（T-601），当前点击"设置"仅记录日志
+- 提供 IPC 命令：`autostart_enable`、`autostart_disable`、`autostart_is_enabled`
+- 事件契约：`overlay://show`（载荷 mode）、`clipboard://pause`（载荷 duration_s 或 null）
+- 交叉评审：GLM-5.3（2026-10-26）PASS，详见 docs/reviews/T-101.md
 
 ### [ ] T-102 [complex] 浮层窗口管理器
 - 无边框、透明、置顶、`skipTaskbar`、默认隐藏、不抢焦点时也能显示
