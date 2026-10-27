@@ -62,6 +62,10 @@ pub fn run() {
             let hotkey_manager = app.state::<HotkeyManager>();
             hotkey_manager.register_defaults(app.handle())?;
 
+            // 启动剪贴板监听
+            let _monitor = services::clipboard::ClipboardMonitor::start(app.handle().clone())?;
+            // TODO: 将 monitor 保存到 AppState，以便应用退出时优雅关闭
+
             Ok(())
         })
         .run(tauri::generate_context!())

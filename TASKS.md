@@ -216,7 +216,7 @@
 
 ## M2 剪贴板历史（用户优先项）
 
-### [ ] T-201 [complex] 剪贴板变更监听
+### [x] T-201 [complex] 剪贴板变更监听 — 2026-10-27
 - 后台线程每 250ms 读 `GetClipboardSequenceNumber`，变化后延迟 30ms 再读取
 - `OpenClipboard` 失败重试 5 次 × 20ms；仍失败则跳过本次并计数
 - 读取完成立即关闭句柄；读取期间不得 `await`
@@ -224,6 +224,16 @@
 
 验收：连续复制 20 次，全部捕获且无重复事件；打开着剪贴板的程序（如 Excel 复制中）不会让监听线程卡死；空闲 CPU ≈ 0%。
 依赖：T-106。
+
+**实现备注**：
+- 新增 `platform/clipboard.rs`：get_sequence_number、open_clipboard、ClipboardGuard（RAII）
+- 新增 `services/clipboard.rs`：ClipboardMonitor（后台线程、动态重试、优雅关闭）
+- 新增 `tests/clipboard_manual.rs`：手测入口（#[ignore]）
+- 修改 `Cargo.toml`：添加 windows features（DataExchange、Memory）
+- 线程生命周期：Arc<AtomicBool> + JoinHandle，Drop 时自动 stop
+- 序列号溢出：wrapping_sub 处理回绕
+- 动态重试：立即 → 10ms → 50ms，总窗口 100-200ms
+- 交叉评审：GLM-5.3 PASS（第 2 轮修复后），详见 docs/reviews/T-201.md
 
 ### [ ] T-202 多格式提取与敏感内容过滤
 - 支持：`CF_UNICODETEXT`、`CF_HTML`、`CF_RTF`、`CF_DIB/PNG`、`CF_HDROP`
