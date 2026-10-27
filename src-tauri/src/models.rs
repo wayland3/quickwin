@@ -24,7 +24,7 @@ pub struct ClipboardItem {
     pub last_copied_at: i64,
     pub copy_count: i64,
     pub pinned: bool,
-    pub sensitive: bool,
+    pub sensitive: bool, // 未使用（敏感内容过滤功能已移除）
     pub truncated: bool,
     pub byte_size: i64,
     pub thumb_path: Option<String>,

@@ -235,14 +235,16 @@
 - 动态重试：立即 → 10ms → 50ms，总窗口 100-200ms
 - 交叉评审：GLM-5.3 PASS（第 2 轮修复后），详见 docs/reviews/T-201.md
 
-### [ ] T-202 多格式提取与敏感内容过滤
+### [ ] T-202 多格式提取
 - 支持：`CF_UNICODETEXT`、`CF_HTML`、`CF_RTF`、`CF_DIB/PNG`、`CF_HDROP`
-- 读取 `ExcludeClipboardContentFromMonitorProcessing`、`CanIncludeInClipboardHistory=0` 时**丢弃**
 - 超限：文本 >256KB 截断并标记；图片 >8MB 只存缩略图并标记
 - 前台应用信息（进程名、标题）随条目记录
 
-验收：从 KeePass/1Password 复制密码不入库；截图入库并能显示缩略图；资源管理器复制 3 个文件显示为文件项；HTML 复制保留纯文本预览。
+验收：截图入库并能显示缩略图；资源管理器复制 3 个文件显示为文件项；HTML 复制保留纯文本预览。
 依赖：T-201、T-104。
+
+**实现备注**：
+- ~~敏感内容过滤~~：用户要求移除此功能（2026-10-27）
 
 ### [ ] T-203 入库管线
 - `hash = sha256(kind + 规范化内容)`；重复则 `copy_count+1`、刷新 `last_copied_at`、置顶显示

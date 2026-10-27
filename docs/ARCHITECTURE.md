@@ -126,7 +126,7 @@ CREATE TABLE clipboard_item (
   last_copied_at INTEGER NOT NULL,  -- unix ms，TTL 依据
   copy_count     INTEGER NOT NULL DEFAULT 1,
   pinned         INTEGER NOT NULL DEFAULT 0,
-  sensitive      INTEGER NOT NULL DEFAULT 0,
+  sensitive      INTEGER NOT NULL DEFAULT 0,  -- 未使用（敏感内容过滤功能已移除）
   truncated      INTEGER NOT NULL DEFAULT 0
 );
 
@@ -303,7 +303,7 @@ pub struct ClipboardItem {
     pub last_copied_at: i64,
     pub copy_count: i64,
     pub pinned: bool,
-    pub sensitive: bool,
+    pub sensitive: bool, // 未使用（敏感内容过滤功能已移除）
     pub truncated: bool,
     pub byte_size: i64,
     pub thumb_path: Option<String>,
@@ -362,7 +362,7 @@ loop every 250ms:
       if OpenClipboard(owner): break
       sleep 20ms
   if failed: metrics.skip += 1; continue
-  read formats（先查询敏感标记，命中则丢弃）
+  read formats（~~先查询敏感标记，命中则丢弃~~ 已移除）
   close
   build candidate → hash → send DbWrite::Put
 DB 线程:

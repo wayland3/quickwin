@@ -114,17 +114,19 @@ send KEYUP(ctrl)
 | `CF_HDROP` | 文件列表，`DragQueryFileW` 逐个取 |
 | `HTML Format` / `Rich Text Format` | 注册格式名，需 `RegisterClipboardFormatW` 获取 id |
 
-### 4.3 敏感内容（必须实现）
+### 4.3 敏感内容（已移除）
 
-以下任一命中则**整条丢弃**，不记录类型、不计数：
+> **注意**：此功能已于 2026-10-27 由用户要求移除。
 
-| 格式名 | 判定 |
+~~以下任一命中则**整条丢弃**，不记录类型、不计数：~~
+
+~~| 格式名 | 判定 |
 |---|---|
 | `ExcludeClipboardContentFromMonitorProcessing` | 存在即排除 |
 | `CanIncludeInClipboardHistory` | `DWORD == 0` 排除 |
-| `CanUploadToCloudClipboard` | `DWORD == 0` 时标记 `sensitive`（本地仍可存，但不入 FTS） |
+| `CanUploadToCloudClipboard` | `DWORD == 0` 时标记 `sensitive`（本地仍可存，但不入 FTS） |~~
 
-密码管理器（KeePassXC、1Password、Bitwarden）会设置这些标记。这是安全底线，不是可选项。
+~~密码管理器（KeePassXC、1Password、Bitwarden）会设置这些标记。这是安全底线，不是可选项。~~
 
 ### 4.4 快照与还原
 
@@ -245,7 +247,7 @@ physical_y = rcWork.top + (rcWork.height * 0.2)
 - [ ] 复制 1MB 文本（截断标记）
 - [ ] 复制 10MB 图片（仅缩略图）
 - [ ] 资源管理器复制 3 个文件
-- [ ] 从 KeePassXC 复制密码（不入库）
+- [ ] ~~从 KeePassXC 复制密码（不入库）~~：已移除（2026-10-27 用户要求）
 - [ ] Excel 复制单元格（OpenClipboard 占用场景）
 - [ ] 复制后立刻按 `Alt+V`（30ms 延迟是否足够）
 
