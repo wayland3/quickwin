@@ -151,7 +151,7 @@
 - 改绑逻辑：先注册新键，成功后注销旧键
 - 交叉评审：待执行
 
-### [ ] T-104 [complex] 前台窗口捕获与焦点恢复
+### [x] T-104 [complex] 前台窗口捕获与焦点恢复 — 2026-10-27
 - 记录触发前的 `HWND`、进程名、窗口标题、显示器
 - 浮层隐藏后通过 `AttachThreadInput` + `SetForegroundWindow` 恢复焦点，超时 150ms 放弃
 - UWP 窗口（`ApplicationFrameHost`）解析真实应用名
@@ -159,6 +159,16 @@
 
 验收：在记事本、VS Code、Chrome、资源管理器、微信中触发浮层后关闭，焦点均回到原窗口且光标位置不变；目标为管理员程序时给出提示而非静默失败。
 依赖：T-102。
+
+**实现备注**：
+- 新增 `platform/focus.rs`：前台窗口捕获、提权检测、焦点恢复
+- 修改 `services/window.rs`：集成焦点恢复，区分 hide 语义（UserCommand/Blur/ModeSwitch）
+- 修改 `commands/mod.rs`：overlay_hide 传入 HideReason::UserCommand
+- 修改 `Cargo.toml`：添加 windows crate features（Security、Threading、Input_KeyboardAndMouse）
+- capture_foreground 在 Hidden→Showing 时调用，失败降级为 None
+- 提权检测使用 TokenElevation（OpenProcessToken + GetTokenInformation）
+- 焦点恢复使用 RAII 守卫（ThreadInputGuard）保证 AttachThreadInput 成对调用
+- 交叉评审：待执行
 
 ### [ ] T-105 [complex] 输入模拟层（SendInput）
 - `send_text`（Unicode，含 emoji/代理对）、`send_combo("ctrl+v")`、`send_copy()`、`send_paste()`

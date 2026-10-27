@@ -1,6 +1,8 @@
 use crate::error::AppError;
 use crate::services::hotkey::{HotkeyAction, HotkeyManager, HotkeyStatus};
-use crate::services::window::{OverlayManager, OverlayMode, ResizePayload, ShowPayload};
+use crate::services::window::{
+    HideReason, OverlayManager, OverlayMode, ResizePayload, ShowPayload,
+};
 use tauri::{Manager, Window};
 use tauri_plugin_autostart::ManagerExt;
 
@@ -49,7 +51,7 @@ pub async fn overlay_show(window: Window, payload: ShowPayload) -> Result<(), Ap
 #[tauri::command]
 pub async fn overlay_hide(window: Window) -> Result<(), AppError> {
     let overlay_manager = window.state::<OverlayManager>();
-    overlay_manager.hide(&window)
+    overlay_manager.hide(&window, HideReason::UserCommand)
 }
 
 #[tauri::command]

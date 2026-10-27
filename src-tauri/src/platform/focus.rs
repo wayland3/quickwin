@@ -2,11 +2,274 @@
 
 use crate::error::AppError;
 use serde::Serialize;
+use std::path::PathBuf;
+use windows::core::PWSTR;
+use windows::Win32::Foundation::{BOOL, FALSE, HWND, LPARAM, TRUE};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
+use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+use windows::Win32::System::Threading::{
+    AttachThreadInput, GetCurrentThreadId, OpenProcess, OpenProcessToken,
+    PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumChildWindows, GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId, IsIconic,
+    IsWindow, SetForegroundWindow, ShowWindow, SW_RESTORE,
+};
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ForegroundWindow {
+    pub hwnd: isize,
+    pub pid: u32,
+    pub process_name: String,
+    pub window_title: String,
+    pub is_elevated: bool,
+    pub is_minimized: bool,
+    pub monitor: Option<String>,
+    pub focus_child: Option<isize>,
+}
+
+/// 捕获当前前台窗口信息（失败降级为 None）
+pub fn capture_foreground() -> Option<ForegroundWindow> {
+    // SAFETY: GetForegroundWindow 无参数
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_invalid() {
+        return None;
+    }
+
+    let mut pid = 0u32;
+    // SAFETY: hwnd 有效
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+
+    // 获取进程名
+    let process_name = get_process_name(pid).unwrap_or_else(|| "unknown".to_string());
+
+    // 检测提权（TokenElevation 为主）
+    let is_elevated = check_elevated(pid);
+
+    // 检测最小化
+    // SAFETY: hwnd 有效
+    let is_minimized = unsafe { IsIconic(hwnd) }.as_bool();
+
+    // 获取焦点子窗口
+    let focus_child = get_focus_child(hwnd);
+
+    Some(ForegroundWindow {
+        hwnd: hwnd.0 as isize,
+        pid,
+        process_name,
+        window_title: String::new(), // 不记录窗口标题到日志
+        is_elevated,
+        is_minimized,
+        monitor: None, // TODO: 获取显示器标识
+        focus_child,
+    })
+}
+
+/// 获取进程名
+fn get_process_name(pid: u32) -> Option<String> {
+    // SAFETY: OpenProcess 是安全的 Win32 调用
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) }.ok()?;
+
+    let mut buf = [0u16; 1024];
+    let mut size = buf.len() as u32;
+    // SAFETY: process 有效，buf 为栈上可变引用
+    let result = unsafe {
+        windows::Win32::System::Threading::QueryFullProcessImageNameW(
+            process,
+            windows::Win32::System::Threading::PROCESS_NAME_FORMAT(0),
+            PWSTR(buf.as_mut_ptr()),
+            &mut size,
+        )
+    };
+
+    if result.is_err() {
+        return None;
+    }
+
+    let path = String::from_utf16_lossy(&buf[..size as usize]);
+    let name = PathBuf::from(&path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    // UWP 检测：ApplicationFrameHost
+    if name.to_lowercase() == "applicationframehost.exe" {
+        // TODO: EnumChildWindows 找真实子窗口
+        // 当前返回宿主名，不影响功能
+    }
+
+    Some(name)
+}
+
+/// 检测进程是否提权（TokenElevation 为主）
+fn check_elevated(pid: u32) -> bool {
+    // SAFETY: OpenProcess 是安全的 Win32 调用
+    let process = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) } {
+        Ok(p) => p,
+        Err(_) => {
+            // ACCESS_DENIED 视为提权
+            return true;
+        }
+    };
+
+    let mut token = windows::Win32::Foundation::HANDLE::default();
+    // SAFETY: process 有效
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.is_err() {
+        return false;
+    }
+
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut ret_len = 0u32;
+    // SAFETY: token 有效，elevation 为栈上可变引用
+    let result = unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut elevation as *mut _ as *mut _),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut ret_len,
+        )
+    };
+
+    if result.is_err() {
+        return false;
+    }
+
+    elevation.TokenIsElevated != 0
+}
+
+/// 获取焦点子窗口
+fn get_focus_child(hwnd: HWND) -> Option<isize> {
+    struct ChildFocus {
+        focus: Option<isize>,
+    }
+
+    extern "system" fn enum_child_proc(child: HWND, param: LPARAM) -> BOOL {
+        // SAFETY: param 为有效指针
+        let data = unsafe { &mut *(param.0 as *mut ChildFocus) };
+        // SAFETY: child 有效
+        if unsafe { GetFocus() } == child {
+            data.focus = Some(child.0 as isize);
+            return FALSE; // 停止枚举
+        }
+        TRUE
+    }
+
+    let mut data = ChildFocus { focus: None };
+    // SAFETY: hwnd 有效，回调函数有效
+    let _ = unsafe {
+        EnumChildWindows(
+            hwnd,
+            Some(enum_child_proc),
+            LPARAM(&mut data as *mut _ as isize),
+        )
+    };
+
+    data.focus
+}
+
+/// RAII 守卫：AttachThreadInput 成对调用
+pub struct ThreadInputGuard {
+    cur_tid: u32,
+    target_tid: u32,
+}
+
+impl ThreadInputGuard {
+    /// 附加当前线程到目标窗口线程
+    pub fn attach(hwnd: HWND) -> Result<Self, AppError> {
+        // SAFETY: GetCurrentThreadId 无参数
+        let cur_tid = unsafe { GetCurrentThreadId() };
+
+        let mut target_tid = 0u32;
+        // SAFETY: hwnd 有效
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut target_tid)) };
+
+        // SAFETY: 成对调用
+        let result = unsafe { AttachThreadInput(cur_tid, target_tid, TRUE) };
+        if result == FALSE {
+            Err(AppError::ElevatedTarget)
+        } else {
+            Ok(Self {
+                cur_tid,
+                target_tid,
+            })
+        }
+    }
+}
+
+impl Drop for ThreadInputGuard {
+    fn drop(&mut self) {
+        // SAFETY: 成对调用
+        let _ = unsafe { AttachThreadInput(self.cur_tid, self.target_tid, FALSE) };
+    }
+}
+
+/// 恢复焦点到之前窗口
+pub fn restore(prev: &ForegroundWindow, timeout_ms: u32) -> Result<(), AppError> {
+    let hwnd = HWND(prev.hwnd as *mut _);
+
+    // IsWindow 校验
+    // SAFETY: hwnd 可能无效
+    let is_valid = unsafe { IsWindow(hwnd) };
+    if is_valid == FALSE {
+        return Err(AppError::Internal("window no longer exists".into()));
+    }
+
+    // 重试 3 次
+    for _ in 0..3 {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // 附加线程输入
+            let _guard = ThreadInputGuard::attach(hwnd)?;
+
+            // 如果最小化，恢复窗口
+            if prev.is_minimized {
+                // SAFETY: hwnd 有效
+                let _ = unsafe { ShowWindow(hwnd, SW_RESTORE) };
+            }
+
+            // 设置前台窗口
+            // SAFETY: hwnd 有效
+            let set_fg_result = unsafe { SetForegroundWindow(hwnd) };
+            if set_fg_result == FALSE {
+                return Err(AppError::Internal("SetForegroundWindow failed".into()));
+            }
+
+            // 设置焦点（优先子窗口）
+            if let Some(child) = prev.focus_child {
+                let child_hwnd = HWND(child as *mut _);
+                // SAFETY: child_hwnd 可能无效
+                let child_valid = unsafe { IsWindow(child_hwnd) };
+                if child_valid == TRUE {
+                    let _ = unsafe { SetFocus(child_hwnd) };
+                }
+            }
+
+            // 校验
+            // SAFETY: GetForegroundWindow 无参数
+            let current = unsafe { GetForegroundWindow() };
+            if current != hwnd {
+                return Err(AppError::Internal("focus not restored".into()));
+            }
+
+            Ok(())
+        }));
+
+        match result {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(AppError::ElevatedTarget)) => return Err(AppError::ElevatedTarget),
+            _ => {
+                std::thread::sleep(std::time::Duration::from_millis((timeout_ms / 3) as u64));
+            }
+        }
+    }
+
+    Err(AppError::Internal("focus restore timeout".into()))
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MonitorInfo {

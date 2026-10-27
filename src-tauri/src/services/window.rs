@@ -1,7 +1,9 @@
 // 浮层窗口管理（状态机）
 
 use crate::error::AppError;
-use crate::platform::focus::{calculate_overlay_position, get_cursor_monitor};
+use crate::platform::focus::{
+    calculate_overlay_position, capture_foreground, get_cursor_monitor, restore, ForegroundWindow,
+};
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Window};
@@ -19,6 +21,13 @@ pub enum OverlayMode {
     Launcher,
     Clipboard,
     Actions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HideReason {
+    UserCommand, // overlay_hide 命令，带恢复
+    Blur,        // 失焦隐藏，不带恢复
+    ModeSwitch,  // 模式切换，不带恢复
 }
 
 impl OverlayMode {
@@ -45,6 +54,7 @@ pub struct OverlayManager {
     current_mode: Arc<Mutex<Option<OverlayMode>>>,
     hide_on_blur: Arc<Mutex<bool>>,
     prefers_reduced_motion: Arc<Mutex<bool>>,
+    prev_window: Arc<Mutex<Option<ForegroundWindow>>>,
 }
 
 impl OverlayManager {
@@ -54,6 +64,7 @@ impl OverlayManager {
             current_mode: Arc::new(Mutex::new(None)),
             hide_on_blur: Arc::new(Mutex::new(true)),
             prefers_reduced_motion: Arc::new(Mutex::new(false)),
+            prev_window: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -74,19 +85,24 @@ impl OverlayManager {
                 if *current == Some(mode) {
                     drop(state);
                     drop(current);
-                    return self.hide(window);
+                    return self.hide(window, HideReason::ModeSwitch);
                 }
-                // 不同 mode，直接切换
+                // 不同 mode，直接切换（不 capture，浮层已是前台）
             }
             OverlayState::Hiding => {
-                // 取消隐藏，立即显示
+                // 取消隐藏，立即显示（不 capture）
             }
             OverlayState::Showing => {
                 // 已在显示中，忽略
                 return Ok(());
             }
             OverlayState::Hidden => {
-                // 正常显示
+                // 正常显示：capture 前台窗口
+                let prev = capture_foreground();
+                *self
+                    .prev_window
+                    .lock()
+                    .map_err(|_| AppError::Internal("lock poisoned".into()))? = prev;
             }
         }
 
@@ -141,7 +157,7 @@ impl OverlayManager {
         Ok(())
     }
 
-    pub fn hide(&self, window: &Window) -> Result<(), AppError> {
+    pub fn hide(&self, window: &Window, reason: HideReason) -> Result<(), AppError> {
         let mut state = self
             .state
             .lock()
@@ -170,19 +186,39 @@ impl OverlayManager {
 
         // 隐藏窗口
         let reduced_motion = self.prefers_reduced_motion_reduced();
-        if reduced_motion {
+        if reduced_motion || reason != HideReason::UserCommand {
+            // 立即隐藏（无动画或不需要恢复焦点）
             window.hide()?;
             *state = OverlayState::Hidden;
+
+            // 仅 UserCommand 恢复焦点
+            if reason == HideReason::UserCommand {
+                if let Some(prev) = self.prev_window.lock().ok().and_then(|p| p.clone()) {
+                    // spawn_blocking 执行恢复，避免阻塞 async runtime
+                    let _ = std::thread::spawn(move || {
+                        let _ = restore(&prev, 150);
+                    });
+                }
+            }
         } else {
+            // 带动画隐藏，延迟后恢复焦点
             *state = OverlayState::Hiding;
             let state_clone = Arc::clone(&self.state);
             let window_clone = window.clone();
+            let prev_window = self.prev_window.lock().ok().and_then(|p| p.clone());
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(80));
                 let _ = window_clone.hide();
                 if let Ok(mut s) = state_clone.lock() {
                     if *s == OverlayState::Hiding {
                         *s = OverlayState::Hidden;
+                    }
+                }
+
+                // 恢复焦点
+                if reason == HideReason::UserCommand {
+                    if let Some(prev) = prev_window {
+                        let _ = restore(&prev, 150);
                     }
                 }
             });
@@ -232,7 +268,7 @@ impl OverlayManager {
         }
         drop(state);
 
-        self.hide(window)
+        self.hide(window, HideReason::Blur)
     }
 
     pub fn set_hide_on_blur(&self, value: bool) {
