@@ -1,4 +1,5 @@
 use crate::error::AppError;
+use crate::services::hotkey::{HotkeyAction, HotkeyManager, HotkeyStatus};
 use crate::services::window::{OverlayManager, OverlayMode, ResizePayload, ShowPayload};
 use tauri::{Manager, Window};
 use tauri_plugin_autostart::ManagerExt;
@@ -55,4 +56,26 @@ pub async fn overlay_hide(window: Window) -> Result<(), AppError> {
 pub async fn overlay_resize(window: Window, payload: ResizePayload) -> Result<(), AppError> {
     let overlay_manager = window.state::<OverlayManager>();
     overlay_manager.resize(&window, payload.height)
+}
+
+#[tauri::command]
+pub async fn hotkey_status(window: Window) -> Result<HotkeyStatus, AppError> {
+    let hotkey_manager = window.state::<HotkeyManager>();
+    hotkey_manager.get_status()
+}
+
+#[tauri::command]
+pub async fn hotkey_rebind(
+    app: tauri::AppHandle,
+    action: String,
+    accelerator: String,
+) -> Result<bool, AppError> {
+    let hotkey_manager = app.state::<HotkeyManager>();
+    let action_enum = match action.as_str() {
+        "launcher" => HotkeyAction::Launcher,
+        "clipboard" => HotkeyAction::Clipboard,
+        "actions" => HotkeyAction::Actions,
+        _ => return Err(AppError::Internal(format!("invalid action: {}", action))),
+    };
+    hotkey_manager.rebind(&app, action_enum, &accelerator)
 }

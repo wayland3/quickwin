@@ -27,6 +27,18 @@ function App() {
       setMode('');
     });
 
+    // 监听热键按下事件
+    const unlistenHotkey = listen<string>('hotkey://pressed', (event) => {
+      const action = event.payload;
+      if (action === 'launcher') {
+        ipc.overlayShow('launcher').catch(console.error);
+      } else if (action === 'clipboard') {
+        ipc.overlayShow('clipboard').catch(console.error);
+      } else if (action === 'actions') {
+        ipc.overlayShow('actions').catch(console.error);
+      }
+    });
+
     // Esc 键隐藏浮层
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -39,6 +51,7 @@ function App() {
       unlistenShow.then(f => f());
       unlistenShown.then(f => f());
       unlistenHidden.then(f => f());
+      unlistenHotkey.then(f => f());
       window.removeEventListener('keydown', handleKeyDown);
     };
   }, []);

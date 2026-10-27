@@ -28,4 +28,15 @@ export const ipc = {
   async overlayResize(height: number): Promise<void> {
     return invoke<void>('overlay_resize', { payload: { height } });
   },
+
+  async hotkeyStatus(): Promise<{
+    bindings: Array<{ action: string; accelerator: string }>;
+    failed: Array<{ action: string; accelerator: string; code: string }>;
+  }> {
+    return invoke('hotkey_status');
+  },
+
+  async hotkeyRebind(action: string, accelerator: string): Promise<boolean> {
+    return invoke<boolean>('hotkey_rebind', { action, accelerator });
+  },
 };

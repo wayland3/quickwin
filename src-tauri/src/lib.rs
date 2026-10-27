@@ -7,6 +7,7 @@ mod models;
 mod platform;
 mod services;
 
+use services::hotkey::HotkeyManager;
 use services::window::OverlayManager;
 use tauri::{Emitter, Manager};
 
@@ -48,11 +49,19 @@ pub fn run() {
             commands::overlay_show,
             commands::overlay_hide,
             commands::overlay_resize,
+            commands::hotkey_status,
+            commands::hotkey_rebind,
         ])
         .manage(OverlayManager::new())
+        .manage(HotkeyManager::new())
         .setup(|app| {
             log::info!("QuickWin starting");
             services::tray::setup_tray(app.handle())?;
+
+            // 注册默认热键
+            let hotkey_manager = app.state::<HotkeyManager>();
+            hotkey_manager.register_defaults(app.handle())?;
+
             Ok(())
         })
         .run(tauri::generate_context!())
