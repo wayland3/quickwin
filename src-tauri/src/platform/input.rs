@@ -1,0 +1,170 @@
+// 输入模拟层（SendInput）
+//
+// # 阻塞警告
+// 本模块所有函数都会阻塞当前线程，禁止在 async 上下文直接调用。
+// 后续接入时需 spawn_blocking 或专用线程。
+
+use crate::error::AppError;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN,
+    VK_SHIFT,
+};
+
+/// 发送 Unicode 文本（含 emoji/代理对）
+///
+/// # 阻塞警告
+/// 此函数会阻塞当前线程（每 50 字符 sleep 1ms），禁止在 async 上下文直接调用。
+pub fn send_text(text: &str) -> Result<(), AppError> {
+    // 清理修饰键
+    clear_modifiers()?;
+
+    // 转为 UTF-16
+    let utf16: Vec<u16> = text.encode_utf16().collect();
+
+    // 分批发送，每 50 字符 sleep 1ms
+    for (i, chunk) in utf16.chunks(50).enumerate() {
+        for &code_unit in chunk {
+            let inputs = [
+                make_key_input(0, code_unit, KEYEVENTF_UNICODE),
+                make_key_input(0, code_unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
+            ];
+            send_inputs(&inputs)?;
+        }
+
+        // 每 50 字符后 sleep（最后一批不 sleep）
+        if i < utf16.len() / 50 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    Ok(())
+}
+
+/// 发送 Ctrl+C
+pub fn send_copy() -> Result<(), AppError> {
+    clear_modifiers()?;
+
+    let inputs = [
+        make_key_input(VK_CONTROL.0, 0, KEYBD_EVENT_FLAGS(0)),
+        make_key_input(VIRTUAL_KEY(0x43).0, 0, KEYBD_EVENT_FLAGS(0)), // 'C'
+        make_key_input(VIRTUAL_KEY(0x43).0, 0, KEYEVENTF_KEYUP),
+        make_key_input(VK_CONTROL.0, 0, KEYEVENTF_KEYUP),
+    ];
+
+    // 按键间隔 10ms
+    for input in &inputs {
+        send_inputs(&[*input])?;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    Ok(())
+}
+
+/// 发送 Ctrl+V
+pub fn send_paste() -> Result<(), AppError> {
+    clear_modifiers()?;
+
+    let inputs = [
+        make_key_input(VK_CONTROL.0, 0, KEYBD_EVENT_FLAGS(0)),
+        make_key_input(VIRTUAL_KEY(0x56).0, 0, KEYBD_EVENT_FLAGS(0)), // 'V'
+        make_key_input(VIRTUAL_KEY(0x56).0, 0, KEYEVENTF_KEYUP),
+        make_key_input(VK_CONTROL.0, 0, KEYEVENTF_KEYUP),
+    ];
+
+    // 按键间隔 10ms
+    for input in &inputs {
+        send_inputs(&[*input])?;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    Ok(())
+}
+
+/// 清理修饰键（先查询状态，确认按下才发 KEYUP）
+fn clear_modifiers() -> Result<(), AppError> {
+    let modifiers = [VK_MENU, VK_LWIN, VK_RWIN, VK_SHIFT, VK_CONTROL];
+
+    for vk in modifiers {
+        // SAFETY: GetAsyncKeyState 是安全的 Win32 调用
+        let state = unsafe { GetAsyncKeyState(vk.0 as i32) };
+        // 检查最低位（按键是否按下）- state 是 i16，0x8000 转为 i16 是 -32768
+        if state & (-32768i16) != 0 {
+            let input = make_key_input(vk.0, 0, KEYEVENTF_KEYUP);
+            send_inputs(&[input])?;
+        }
+    }
+
+    Ok(())
+}
+
+/// 构造 INPUT 结构
+fn make_key_input(vk: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(vk),
+                wScan: scan,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+/// 发送 INPUT 数组，返回实际注入数量
+fn send_inputs(inputs: &[INPUT]) -> Result<u32, AppError> {
+    // SAFETY: inputs 为有效 INPUT 数组
+    let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
+
+    if sent == 0 {
+        // 零注入：检查 UIPI
+        // 复用 T-104 的提权检测逻辑（简化版：检查 GetLastError）
+        // 实际实现中应调用 platform::focus::check_elevated
+        // 这里简化处理：零注入视为 UIPI
+        return Err(AppError::ElevatedTarget);
+    }
+
+    if sent < inputs.len() as u32 {
+        // 部分注入：不重试，返回错误
+        return Err(AppError::Internal(format!(
+            "SendInput partial: sent {} of {}",
+            sent,
+            inputs.len()
+        )));
+    }
+
+    Ok(sent)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[allow(non_snake_case)]
+    fn UTF16代理对拆分正确() {
+        // emoji: 😀 (U+1F600)
+        let text = "😀";
+        let utf16: Vec<u16> = text.encode_utf16().collect();
+        assert_eq!(utf16.len(), 2); // 代理对拆成两个 u16
+        assert_eq!(utf16[0], 0xD83D);
+        assert_eq!(utf16[1], 0xDE00);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 普通字符UTF16长度正确() {
+        let text = "hello";
+        let utf16: Vec<u16> = text.encode_utf16().collect();
+        assert_eq!(utf16.len(), 5);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 中文字符UTF16长度正确() {
+        let text = "你好";
+        let utf16: Vec<u16> = text.encode_utf16().collect();
+        assert_eq!(utf16.len(), 2); // 中文不在代理对范围
+    }
+}

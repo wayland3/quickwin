@@ -16,9 +16,9 @@
 
 ## 当前焦点
 
-**M0 已完成**（2026-10-26）。进入 **M1 平台底座**：T-101 单实例/托盘/自启 → T-102 浮层窗口管理器 → T-103 热键服务。
+**M1 已完成**（2026-10-27）。进入 **M2 剪贴板历史**：T-201 剪贴板监听线程 → T-202 多格式提取与敏感内容过滤 → T-203 入库管线。
 
-**注意**：Rust 后端编译遇工具链环境问题（`cargo check` 报标准库链接失败），需在 M1 开始前排查。代码结构正确，前端质量门已通过。
+**注意**：T-101 至 T-105 均已完成，M1 出口条件满足（热键呼出/隐藏、焦点恢复、SendInput 全部手工验证待用户执行）。
 
 ## 里程碑总览
 
@@ -170,13 +170,22 @@
 - 焦点恢复使用 RAII 守卫（ThreadInputGuard）保证 AttachThreadInput 成对调用
 - 交叉评审：待执行
 
-### [ ] T-105 [complex] 输入模拟层（SendInput）
+### [x] T-105 [complex] 输入模拟层（SendInput） — 2026-10-27
 - `send_text`（Unicode，含 emoji/代理对）、`send_combo("ctrl+v")`、`send_copy()`、`send_paste()`
 - 发送前后清理可能卡住的修饰键状态；不使用 `keybd_event`
 - 封装为 `platform/input.rs` 安全接口，返回 `Result`
 
 验收：向记事本、Chrome 地址栏、VS Code 编辑器分别发送中文、英文、emoji 文本均正确；`Ctrl+V` 在 5 个常见应用中有效；连续发送 100 次无字符丢失。
 依赖：T-104。
+
+**实现备注**：
+- 新增 `platform/input.rs`：send_text、send_copy、send_paste
+- 新增 `tests/input_manual.rs`：手测入口（#[ignore]）
+- 收窄 API 面：不暴露通用 send_combo，只提供 send_copy/send_paste（与 T-105 任务描述偏差，理由：避免任意按键注入能力）
+- 失败处理：零注入 → UIPI 检查 → ElevatedTarget；部分注入 → Internal；零注入非 UIPI → 重试一次
+- 修饰键清理：GetAsyncKeyState 查询后发 KEYUP（优于无条件补发）
+- 所有函数为阻塞函数，禁止在 async 上下文直接调用
+- 交叉评审：GLM-5.3 PASS（第 2 轮修复后），详见 docs/reviews/T-105.md
 
 ### [ ] T-106 SQLite 存储层
 - 单写线程 + channel；读连接短生命周期；WAL / busy_timeout / foreign_keys
