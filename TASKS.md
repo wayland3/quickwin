@@ -116,7 +116,7 @@
 - 事件契约：`overlay://show`（载荷 mode）、`clipboard://pause`（载荷 duration_s 或 null）
 - 交叉评审：GLM-5.3（2026-10-26）PASS，详见 docs/reviews/T-101.md
 
-### [ ] T-102 [complex] 浮层窗口管理器
+### [x] T-102 [complex] 浮层窗口管理器 — 2026-10-27
 - 无边框、透明、置顶、`skipTaskbar`、默认隐藏、不抢焦点时也能显示
 - 显示在**鼠标所在显示器**的工作区居中偏上（距顶 20%），物理像素与 DPI 换算正确
 - 失焦自动隐藏（设置可关）；`Esc` 隐藏；窗口高度随内容 120–560 动态调整
@@ -124,6 +124,15 @@
 
 验收：双屏不同缩放（100%/150%）下位置与尺寸正确；全屏视频上按热键能出现；失焦即隐藏；连续开关 50 次无残影/闪烁。
 依赖：T-004。
+
+**实现备注**：
+- 新增 `platform/focus.rs`：显示器定位 + DPI 获取 + 位置计算纯函数（4 个单测）
+- 新增 `services/window.rs`：浮层窗口状态机（Hidden/Showing/Shown/Hiding）
+- 新增 IPC 命令：`overlay_show`、`overlay_hide`、`overlay_resize`
+- 前端监听 `overlay://shown`/`overlay://hidden` 事件，Esc 键隐藏
+- 状态机处理重入：重复 hide 幂等、Hiding 中过滤 blur、show 取消 Hiding
+- 动画：显示 120ms、隐藏 80ms，支持减少动画模式
+- 交叉评审：GLM-5.3（2026-10-27）PASS（第 2 轮修复后），详见 docs/reviews/T-102.md
 
 ### [ ] T-103 热键服务
 - 默认：`Alt+Space` 启动器、`Alt+V` 剪贴板、`Alt+X` 划词

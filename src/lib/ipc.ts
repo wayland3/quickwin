@@ -16,4 +16,16 @@ export const ipc = {
   async autostartIsEnabled(): Promise<boolean> {
     return invoke<boolean>('autostart_is_enabled');
   },
+
+  async overlayShow(mode: string): Promise<void> {
+    return invoke<void>('overlay_show', { payload: { mode } });
+  },
+
+  async overlayHide(): Promise<void> {
+    return invoke<void>('overlay_hide');
+  },
+
+  async overlayResize(height: number): Promise<void> {
+    return invoke<void>('overlay_resize', { payload: { height } });
+  },
 };

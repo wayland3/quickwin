@@ -7,6 +7,7 @@ mod models;
 mod platform;
 mod services;
 
+use services::window::OverlayManager;
 use tauri::{Emitter, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -44,7 +45,11 @@ pub fn run() {
             commands::autostart_enable,
             commands::autostart_disable,
             commands::autostart_is_enabled,
+            commands::overlay_show,
+            commands::overlay_hide,
+            commands::overlay_resize,
         ])
+        .manage(OverlayManager::new())
         .setup(|app| {
             log::info!("QuickWin starting");
             services::tray::setup_tray(app.handle())?;
