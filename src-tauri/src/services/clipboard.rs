@@ -3,7 +3,7 @@
 // 后台线程轮询剪贴板序列号，检测到变化后发送事件。
 
 use crate::error::AppError;
-use crate::platform::clipboard::{get_sequence_number, open_clipboard};
+use crate::platform::clipboard::{get_sequence_number, open_clipboard, read_clipboard_content};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -91,17 +91,42 @@ impl ClipboardMonitor {
                     last_seq = current_seq;
                     fail_count = 0;
 
-                    // 发送事件（只带 id 与类型，不带内容）
-                    let event_id = current_seq;
-                    let _ = app.emit(
-                        "clipboard://changed",
-                        serde_json::json!({
-                            "id": event_id,
-                            "type": "unknown" // TODO: T-202 实现类型检测
-                        }),
-                    );
+                    // 读取剪贴板内容
+                    match read_clipboard_content() {
+                        Ok(Some(entry)) => {
+                            // 发送事件（包含内容类型和预览）
+                            let event_id = current_seq;
+                            let content_type = match &entry.content {
+                                crate::platform::clipboard::ClipboardContent::Text(_) => "text",
+                                crate::platform::clipboard::ClipboardContent::Html(_) => "html",
+                                crate::platform::clipboard::ClipboardContent::Rtf(_) => "rtf",
+                                crate::platform::clipboard::ClipboardContent::Image(_) => "image",
+                                crate::platform::clipboard::ClipboardContent::Files(_) => "files",
+                            };
 
-                    log::debug!("clipboard changed: id={}", event_id);
+                            let _ = app.emit(
+                                "clipboard://changed",
+                                serde_json::json!({
+                                    "id": event_id,
+                                    "type": content_type,
+                                    "preview": entry.preview,
+                                    "truncated": entry.truncated,
+                                }),
+                            );
+
+                            log::debug!(
+                                "clipboard changed: id={}, type={}",
+                                event_id,
+                                content_type
+                            );
+                        }
+                        Ok(None) => {
+                            log::debug!("clipboard changed but no content extracted");
+                        }
+                        Err(e) => {
+                            log::warn!("failed to read clipboard content: {}", e);
+                        }
+                    }
                 } else {
                     // 重试失败，记录警告
                     fail_count += 1;

@@ -40,6 +40,12 @@ impl From<tauri::Error> for AppError {
     }
 }
 
+impl From<windows::core::Error> for AppError {
+    fn from(err: windows::core::Error) -> Self {
+        AppError::Internal(err.to_string())
+    }
+}
+
 impl Serialize for AppError {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
