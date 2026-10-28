@@ -244,17 +244,25 @@
 依赖：T-201、T-104。
 
 **实现备注**：
-- 新增 `platform/clipboard.rs` 多格式读取函数：read_clipboard_content、read_unicode_text、read_html、read_rtf、read_image、read_file_list
+- 新增 `platform/clipboard.rs` 多格式读取函数：read_clipboard_content、read_unicode_text、read_html、read_rtf、read_image_bytes、read_file_list
 - 新增 ClipboardContent 枚举和 ClipboardEntry 结构体
-- 实现 HTML 格式解析（parse_html_fragment）
+- 实现 HTML 格式解析（parse_html_fragment，优先 StartFragment/EndFragment，回退 StartHTML/EndHTML）
 - 实现 HTML/RTF 转纯文本（用于预览）
-- 实现文本截断（truncate_text）
+- 实现文本截断（按字符数 / 字符边界，不切坏多字节字符）
 - 添加 windows features：Win32_UI_Shell、Win32_UI_Shell_Common
 - 添加 From<windows::core::Error> for AppError
-- 22 个测试通过（新增 5 个剪贴板测试）
-- 交叉评审：待执行
+- 交叉评审：GLM-5.3 第一轮 **FAIL**（CF_DIB 未读取、RTF 按 UTF-16 误判、>8MB 图片静默丢弃），修复后第二轮 **PASS**，详见 docs/reviews/T-202.md
+- 修复内容（2026-10-28）：
+  - 补 CF_DIB(8) / CF_DIBV5(17) 读取；`ClipboardContent::Image { data, format }`，`ImageFormat::{Png,Dib}`，blob 扩展名随格式（`.png` / `.dib`）
+  - RTF 改为按字节读 + `from_utf8_lossy`（不再按 UTF-16 猜测）；UTF-16 解码只用于 CF_UNICODETEXT，并按第一个 NUL 截断
+  - >8MB 图片改为生成 `truncated=true`、`preview="[图片过大]"`、无 blob 的标记条目，不再静默丢弃（UI-SPEC §4.4「原图过大」）
+  - 格式常量命名（CF_UNICODETEXT/CF_HDROP/CF_DIB/CF_DIBV5）；文本补 256KB 上限（字符边界截断）
+  - GlobalSize 先判大小再拷贝；DragQueryFileW 长度 `saturating_add` + `u32::MAX` 防御；register_format 返回 0 记 debug 日志
+- 偏差（排期 T-204）：缩略图生成与 DIB→PNG 转换需 WIC，尚未实现；`source_title` 出于隐私暂不采集
+- 36 个 Rust 测试通过（新增 DIB/超限/格式携带等用例）
+- 真机手测：待用户执行（PrtScn 截图、资源管理器复制 3 文件、Chrome 富文本预览）
 
-### [ ] T-203 入库管线
+### [x] T-203 入库管线 — 2026-10-28
 - `hash = sha256(kind + 规范化内容)`；重复则 `copy_count+1`、刷新 `last_copied_at`、置顶显示
 - 文本写入 `preview`（≤512 字）+ `text`；图片写 blob + 缩略图；文件列表存 JSON
 - FTS 行同步更新；单事务提交
@@ -262,6 +270,24 @@
 
 验收：同一内容复制 3 次只有 1 条记录且计数为 3；预览不含控制字符；FTS 能搜到 3 字以上子串；数据库写入失败时 UI 有提示且不崩。
 依赖：T-202。
+
+**实现备注**：
+- 新增 `services/storage.rs`：SQLite 存储层（`ClipboardStorage`），负责迁移、去重入库、FTS 同步、blob 落盘
+- 数据库路径 `%APPDATA%\com.quickwin.app\quickwin.db`；PRAGMA：WAL / synchronous=NORMAL / busy_timeout=5000 / foreign_keys=ON
+- 迁移：`PRAGMA user_version` 0 → 1，建表 + 索引 + FTS5（trigram），单事务；版本高于当前时启动报错而不是跳过
+- 去重：`sha256(kind + 规范化内容)`（文本类统一换行、文件列表按路径排序），先查 hash 再决定插入或 `copy_count+1` + 刷新 `last_copied_at`；返回真实 id（`InsertOutcome::{Inserted,Updated}`）
+- 事务：`Connection::transaction()`，插入主表 + FTS + 提交在同事务内，任一步失败自动回滚
+- FTS：显式 `rowid = clipboard_item.id`；启动时对比主表/ FTS 行数，不一致则 `rebuild`
+- blob：图片写 `blobs\<hash 前两位>\<hash>.<ext>`（PNG 源为 `.png`，DIB 源为 `.dib`），DB 存相对路径；先落盘再写库；超限图片不写 blob
+- 预览：去控制字符（保留 `\n`、`\t`），按字符截断到 512，避免切坏多字节字符
+- 事件：成功 `clipboard://changed { id, kind }`（500ms 节流，首条不节流）；失败 `clipboard://insert-error { code, message }`（不节流），前端 `App.tsx` 监听并显示中文 toast，4s 自动消失
+- 生命周期修复：`ClipboardMonitor` 由 `app.manage()` 持有（此前 setup 里 `let _monitor` 会被立即 drop，监听线程实际未运行）
+- 启动降级：存储初始化失败只记日志、不阻塞应用启动
+- 顺手修复 T-202 遗留：`truncate_text` 按字节切片会 panic（中文 >512 字节），改为按字符截断；补上 256KB 正文上限
+- 测试：36 个 Rust 测试通过（T-203 新增 10 个：三次复制去重计数、预览去控制字符、预览 512 字符、FTS 子串、FTS 行数一致、hash 规范化、文件列表 JSON、图片 blob 落盘、超大图标记条目、迁移幂等）
+- 偏差：图片缩略图未生成（需 WIC 解码，留到 T-204 用 blob 原图 + CSS 缩放展示）；`source_title` 暂不采集（`focus::capture_foreground` 出于隐私未读窗口标题）；>8MB 图片只记录标记条目（`truncated=1`、无 blob），缩略图与 DIB→PNG 转换随 T-204 补齐
+- 交叉评审：GLM-5.3 PASS（qwen3.7-plus 配额不足，经用户同意降级），详见 docs/reviews/T-203.md
+- 说明：本任务同时修复了 T-202 复评发现的 3 个阻塞问题（DIB 读取、RTF 编码、超限图片），修复单独提交
 
 ### [ ] T-204 剪贴板面板 UI
 - `Alt+V` 打开，布局见 `UI-SPEC.md`

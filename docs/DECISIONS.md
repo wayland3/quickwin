@@ -69,6 +69,7 @@
 - 结构化数据与文本存 SQLite（`rusqlite`，`bundled` 自带 SQLite 与 FTS5）。
 - 图片/缩略图存 `blobs/` 文件，DB 只存相对路径。
 - 独立 FTS5 表（非 external content），写入时同步。
+- 去重键用 `sha2`（`Sha256`）计算 `sha256(kind + 规范化内容)`，避免引入更大体积的加密库。
 
 **理由**：
 

@@ -62,9 +62,16 @@ pub fn run() {
             let hotkey_manager = app.state::<HotkeyManager>();
             hotkey_manager.register_defaults(app.handle())?;
 
-            // 启动剪贴板监听
-            let _monitor = services::clipboard::ClipboardMonitor::start(app.handle().clone())?;
-            // TODO: 将 monitor 保存到 AppState，以便应用退出时优雅关闭
+            // 启动剪贴板监听；monitor 必须交给 AppState 持有，否则线程会被立即回收
+            match services::clipboard::ClipboardMonitor::start(app.handle().clone()) {
+                Ok(monitor) => {
+                    app.manage(monitor);
+                }
+                Err(e) => {
+                    // 存储初始化失败时不阻塞应用启动，记录错误供诊断
+                    log::error!("clipboard monitor failed to start: {}", e);
+                }
+            }
 
             Ok(())
         })
