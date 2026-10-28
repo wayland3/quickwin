@@ -16,7 +16,7 @@
 
 ## 当前焦点
 
-**M1 已完成**（2026-10-27）。进入 **M2 剪贴板历史**：T-201 剪贴板监听线程 → T-202 多格式提取与敏感内容过滤 → T-203 入库管线。
+**M1 已完成**（2026-10-27）。**M2 剪贴板历史**推进中：T-201/T-202/T-203/T-204 已完成，下一个是 T-205（激活与粘贴，complex，需先写 mini-design）。
 
 **注意**：T-101 至 T-105 均已完成，M1 出口条件满足（热键呼出/隐藏、焦点恢复、SendInput 全部手工验证待用户执行）。
 
@@ -289,7 +289,7 @@
 - 交叉评审：GLM-5.3 PASS（qwen3.7-plus 配额不足，经用户同意降级），详见 docs/reviews/T-203.md
 - 说明：本任务同时修复了 T-202 复评发现的 3 个阻塞问题（DIB 读取、RTF 编码、超限图片），修复单独提交
 
-### [ ] T-204 剪贴板面板 UI
+### [x] T-204 剪贴板面板 UI（2026-10-28）
 - `Alt+V` 打开，布局见 `UI-SPEC.md`
 - 搜索框实时过滤（防抖 80ms）；Tab 切换 全部/文本/图片/文件/收藏
 - 键盘：↑↓ 选择、`Enter` 粘贴、`Ctrl+Enter` 仅复制、`Ctrl+P` 置顶、`Delete` 删除、`Esc` 关闭
@@ -298,6 +298,24 @@
 
 验收：1000 条数据下输入到出结果 <50ms；键盘全程可操作无需鼠标；置顶项始终在顶部并有标记；删除后列表与数据库同步。
 依赖：T-203。
+
+实现备注（2026-10-28）：
+- 后端新增 `services/query.rs`（搜索/筛选纯函数，含转义与纯标点回退）、`commands/clipboard.rs`
+  （`clipboard_list/get/set_pinned/delete`）、`storage.rs` 的 `list/get/set_pinned/delete` 与 `open_readonly_at`
+- 并发模型：每 command 短连接 + `spawn_blocking`，`Connection` 与锁都不跨 await；`DbPath` 只读受管状态
+- 排序照 `ARCHITECTURE §5.3`：`pinned DESC` 首键；FTS 集合内按 `bm25`；末尾 `id DESC` 稳定 tie-break
+- 图片预览：`tauri.conf.json` 开 `assetProtocol`（scope `$APPDATA/blobs/**`）+ Cargo `protocol-asset` feature，见 `docs/DECISIONS.md` ADR-0013
+- 偏差 1：v1 无回收站，`Delete` 与 `Shift+Delete` 都是物理删除（`hard` 只区分是否删 blob；孤儿 blob 由 T-206 回收）
+- 偏差 2：`Enter` / `Ctrl+Enter` 在 T-204 只完成键位接线并提示「功能开发中」，真实粘贴/仅复制在 T-205
+- 偏差 3：`thumb_path` 恒为 NULL（WIC 缩略图未实现），列表用类型占位图标
+- 新增 `ClipboardDetail.file_exists`，预览区据此把缺失文件标红（`UI-SPEC §4.4`）
+- 性能：Rust 测试「千条数据搜索查询在五十毫秒内」插入 1000 条，FTS/LIKE 各 10 次取中位数并断言 <50ms；
+  dev 模式输出 `[perf] clipboard list A=..ms B=..ms`（A=防抖后→DOM commit，B=按键→commit），供真机采集
+- 测试：57 个 Rust 测试 + 46 个前端测试通过；`npm.cmd run verify` 全绿
+- 交叉评审：seed-2.1-pro **PASS**（设计 4 轮、实现 2 轮），记录见 `docs/reviews/T-204.md`
+- 待办（真机手测，需 Windows 桌面）：Alt+V 打开与焦点、中文 3 字/1 字搜索、纯标点不报错、Tab 循环、
+  ↑↓/PgUp/PgDn、Ctrl+P 置顶与 📌/×N/分隔线、Delete/Shift+Delete 与 blob 清理、截图预览（asset 协议）、
+  DIB 占位文案、IME 组合期按键、Esc 关闭、1000 条下 A/B 耗时
 
 ### [ ] T-205 [complex] 激活与粘贴
 - 流程：隐藏浮层 → 恢复前台窗口 → 将条目写入剪贴板（全格式）→ 抑制监听（hash + 1.5s 窗口）→ `Ctrl+V`

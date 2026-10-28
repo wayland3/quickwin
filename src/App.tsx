@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ipc } from './lib/ipc';
 import { listen } from '@tauri-apps/api/event';
+import { ClipboardPanel } from './windows/ClipboardPanel';
 
 function App() {
   const [pingResult, setPingResult] = useState<string>('');
@@ -74,7 +75,7 @@ function App() {
   }, []);
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-slate-900/95 text-slate-100">
+    <main className="qw-root">
       {toast && (
         <div
           role="alert"
@@ -83,25 +84,20 @@ function App() {
           {toast}
         </div>
       )}
-      <div className="text-center">
-        <h1 className="mb-4 text-4xl font-bold">QuickWin</h1>
-        <p className="mb-2 text-slate-400">脚手架已就绪，等待业务开发</p>
-        {mode && (
-          <p className="mt-4 text-sm text-blue-400">
-            当前模式：{mode}
-          </p>
-        )}
-        {pingResult && (
-          <p className="mt-4 text-sm text-green-400">
-            后端连通：{pingResult}
-          </p>
-        )}
-        {error && (
-          <p className="mt-4 text-sm text-red-400">
-            后端未就绪：{error}
-          </p>
-        )}
-      </div>
+
+      {mode === 'clipboard' ? (
+        <ClipboardPanel />
+      ) : (
+        <div className="qw-placeholder">
+          <h1 className="mb-4 text-4xl font-bold">QuickWin</h1>
+          <p className="mb-2 text-slate-400">脚手架已就绪，等待业务开发</p>
+          {mode && <p className="mt-4 text-sm text-blue-400">当前模式：{mode}</p>}
+          {pingResult && (
+            <p className="mt-4 text-sm text-green-400">后端连通：{pingResult}</p>
+          )}
+          {error && <p className="mt-4 text-sm text-red-400">后端未就绪：{error}</p>}
+        </div>
+      )}
     </main>
   );
 }

@@ -51,6 +51,10 @@ pub fn run() {
             commands::overlay_resize,
             commands::hotkey_status,
             commands::hotkey_rebind,
+            commands::clipboard::clipboard_list,
+            commands::clipboard::clipboard_get,
+            commands::clipboard::clipboard_set_pinned,
+            commands::clipboard::clipboard_delete,
         ])
         .manage(OverlayManager::new())
         .manage(HotkeyManager::new())
@@ -61,6 +65,17 @@ pub fn run() {
             // 注册默认热键
             let hotkey_manager = app.state::<HotkeyManager>();
             hotkey_manager.register_defaults(app.handle())?;
+
+            // 数据库路径作为只读配置交给受管状态；command 侧按需开短连接
+            match services::storage::DbPath::resolve() {
+                Ok(db_path) => {
+                    app.manage(db_path);
+                }
+                Err(e) => {
+                    // 路径解析失败不阻塞启动，剪贴板 command 会返回可操作的中文错误
+                    log::error!("failed to resolve database path: {}", e);
+                }
+            }
 
             // 启动剪贴板监听；monitor 必须交给 AppState 持有，否则线程会被立即回收
             match services::clipboard::ClipboardMonitor::start(app.handle().clone()) {

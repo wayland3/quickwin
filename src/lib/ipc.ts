@@ -1,4 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
+import type {
+  ClipFilter,
+  ClipboardDetail,
+  ClipboardListResult,
+} from './clipboard';
 
 export const ipc = {
   async appPing(): Promise<string> {
@@ -38,5 +43,26 @@ export const ipc = {
 
   async hotkeyRebind(action: string, accelerator: string): Promise<boolean> {
     return invoke<boolean>('hotkey_rebind', { action, accelerator });
+  },
+
+  async clipboardList(params: {
+    query: string;
+    filter: ClipFilter;
+    limit: number;
+    offset: number;
+  }): Promise<ClipboardListResult> {
+    return invoke<ClipboardListResult>('clipboard_list', params);
+  },
+
+  async clipboardGet(id: number): Promise<ClipboardDetail> {
+    return invoke<ClipboardDetail>('clipboard_get', { id });
+  },
+
+  async clipboardSetPinned(id: number, pinned: boolean): Promise<void> {
+    return invoke<void>('clipboard_set_pinned', { id, pinned });
+  },
+
+  async clipboardDelete(id: number, hard: boolean): Promise<void> {
+    return invoke<void>('clipboard_delete', { id, hard });
   },
 };

@@ -9,11 +9,28 @@
 // 所有写操作都在单事务内完成，失败自动回滚。
 
 use crate::error::AppError;
+use crate::models::{ClipFilter, ClipKind, ClipboardDetail, ClipboardItem};
 use crate::platform::clipboard::{ClipboardContent, ClipboardEntry, ImageFormat};
-use rusqlite::{params, Connection, OptionalExtension};
+use crate::services::query::{self, SearchKind};
+use rusqlite::types::FromSql;
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// 列表查询列（不取 `text_body`，遵守 §6.1「列表只返回 preview」）
+const LIST_COLUMNS: &str = "id, kind, preview, source_app, created_at, last_copied_at, \
+                            copy_count, pinned, sensitive, truncated, byte_size, thumb_path";
+
+/// FTS 联表查询列（需带 `c.` 前缀）
+const LIST_COLUMNS_FTS: &str = "c.id, c.kind, c.preview, c.source_app, c.created_at, \
+                                c.last_copied_at, c.copy_count, c.pinned, c.sensitive, \
+                                c.truncated, c.byte_size, c.thumb_path";
+
+/// 详情查询列
+const DETAIL_COLUMNS: &str = "id, kind, preview, text_body, html, rtf, file_list, blob_path, \
+                              thumb_path, byte_size, created_at, last_copied_at, copy_count, \
+                              pinned, truncated, source_app";
 
 /// 预览最大字符数（按字符计，避免截断多字节字符）
 const PREVIEW_MAX_CHARS: usize = 512;
@@ -78,6 +95,28 @@ impl InsertOutcome {
     /// 是否为新条目
     pub fn is_new(self) -> bool {
         matches!(self, Self::Inserted(_))
+    }
+}
+
+/// 数据库路径（只读配置，供 command 层按需开短连接）
+#[derive(Debug, Clone)]
+pub struct DbPath(PathBuf);
+
+impl DbPath {
+    /// 解析默认路径：`%APPDATA%\com.quickwin.app\quickwin.db`
+    pub fn resolve() -> Result<Self, AppError> {
+        Ok(Self(
+            ClipboardStorage::default_data_dir()?.join("quickwin.db"),
+        ))
+    }
+
+    /// 由外部路径构造（测试与将来迁移用）
+    pub fn from_path(path: PathBuf) -> Self {
+        Self(path)
+    }
+
+    pub fn as_path(&self) -> &Path {
+        &self.0
     }
 }
 
@@ -377,6 +416,317 @@ impl ClipboardStorage {
 
         Ok(format!("{:x}", hasher.finalize()))
     }
+
+    /// 列表查询：返回当前页条目与同条件总数
+    ///
+    /// - 列表只返回 `preview`，不返回正文（`ARCHITECTURE §6.1`）
+    /// - 排序：`pinned DESC` 恒为第一键；FTS 路径集合内按 `bm25` 相关度，末尾 `id DESC` 稳定 tie-break
+    pub fn list(
+        &self,
+        query_text: &str,
+        filter: ClipFilter,
+        limit: u32,
+        offset: u32,
+    ) -> Result<(Vec<ClipboardItem>, i64), AppError> {
+        let (limit, clamped) = query::clamp_limit(limit);
+        if clamped {
+            log::debug!("clipboard list limit clamped: applied={}", limit);
+        }
+
+        let spec = query::build_search(query_text);
+        let filter_sql = query::filter_clause(filter);
+        let filter_fts = query::filter_clause_fts(filter);
+
+        let like_clause = " AND (preview LIKE ?1 ESCAPE '\\' OR text_body LIKE ?1 ESCAPE '\\')";
+
+        let (rows_sql, count_sql, pattern): (String, String, Option<&str>) = match spec.kind {
+            SearchKind::None => (
+                format!(
+                    "SELECT {} FROM clipboard_item WHERE 1=1{} \
+                     ORDER BY pinned DESC, last_copied_at DESC, id DESC LIMIT ?1 OFFSET ?2",
+                    LIST_COLUMNS, filter_sql
+                ),
+                format!(
+                    "SELECT COUNT(*) FROM clipboard_item WHERE 1=1{}",
+                    filter_sql
+                ),
+                None,
+            ),
+            SearchKind::Like => (
+                format!(
+                    "SELECT {} FROM clipboard_item WHERE 1=1{}{} \
+                     ORDER BY pinned DESC, last_copied_at DESC, id DESC LIMIT ?2 OFFSET ?3",
+                    LIST_COLUMNS, filter_sql, like_clause
+                ),
+                format!(
+                    "SELECT COUNT(*) FROM clipboard_item WHERE 1=1{}{}",
+                    filter_sql, like_clause
+                ),
+                Some(spec.param.as_str()),
+            ),
+            SearchKind::Fts => (
+                format!(
+                    "SELECT {} FROM clipboard_fts f JOIN clipboard_item c ON c.id = f.rowid \
+                     WHERE clipboard_fts MATCH ?1{} \
+                     ORDER BY c.pinned DESC, bm25(clipboard_fts), c.last_copied_at DESC, c.id DESC \
+                     LIMIT ?2 OFFSET ?3",
+                    LIST_COLUMNS_FTS, filter_fts
+                ),
+                format!(
+                    "SELECT COUNT(*) FROM clipboard_fts f JOIN clipboard_item c ON c.id = f.rowid \
+                     WHERE clipboard_fts MATCH ?1{}",
+                    filter_fts
+                ),
+                Some(spec.param.as_str()),
+            ),
+        };
+
+        let total: i64 = match pattern {
+            Some(p) => self
+                .conn
+                .query_row(&count_sql, params![p], |row| row.get(0)),
+            None => self.conn.query_row(&count_sql, [], |row| row.get(0)),
+        }
+        .map_err(|e| AppError::Storage(format!("failed to count clipboard items: {}", e)))?;
+
+        let mut stmt = self
+            .conn
+            .prepare(&rows_sql)
+            .map_err(|e| AppError::Storage(format!("failed to prepare list query: {}", e)))?;
+
+        let mut rows = match pattern {
+            Some(p) => stmt.query(params![p, i64::from(limit), i64::from(offset)]),
+            None => stmt.query(params![i64::from(limit), i64::from(offset)]),
+        }
+        .map_err(|e| AppError::Storage(format!("failed to run list query: {}", e)))?;
+
+        let mut items = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| AppError::Storage(format!("failed to read list row: {}", e)))?
+        {
+            items.push(map_list_item(row)?);
+        }
+
+        Ok((items, total))
+    }
+
+    /// 详情查询；id 不存在返回 `None`（由 command 层转成用户可见提示）
+    pub fn get(&self, id: i64) -> Result<Option<ClipboardDetail>, AppError> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {} FROM clipboard_item WHERE id = ?1",
+                DETAIL_COLUMNS
+            ))
+            .map_err(|e| AppError::Storage(format!("failed to prepare detail query: {}", e)))?;
+
+        let mut rows = stmt
+            .query(params![id])
+            .map_err(|e| AppError::Storage(format!("failed to run detail query: {}", e)))?;
+
+        match rows
+            .next()
+            .map_err(|e| AppError::Storage(format!("failed to read detail row: {}", e)))?
+        {
+            Some(row) => Ok(Some(map_detail(row, &self.data_dir)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// 置顶 / 取消置顶
+    pub fn set_pinned(&self, id: i64, pinned: bool) -> Result<(), AppError> {
+        let affected = self
+            .conn
+            .execute(
+                "UPDATE clipboard_item SET pinned = ?1 WHERE id = ?2",
+                params![i64::from(pinned), id],
+            )
+            .map_err(|e| AppError::Storage(format!("failed to update pinned: {}", e)))?;
+
+        if affected == 0 {
+            return Err(AppError::Storage(format!(
+                "clipboard item not found: {}",
+                id
+            )));
+        }
+
+        log::debug!("clipboard item pin updated: id={}, pinned={}", id, pinned);
+        Ok(())
+    }
+
+    /// 删除（`hard=true` 时同时删除 blob 文件）
+    ///
+    /// v1 没有回收站：两个入口都是物理删除，`hard=false` 只保留 blob 文件（孤儿由 T-206 回收）。
+    pub fn delete(&mut self, id: i64, hard: bool) -> Result<(), AppError> {
+        let blob_relative: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT blob_path FROM clipboard_item WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| AppError::Storage(format!("failed to query blob_path: {}", e)))?;
+
+        let Some(blob_relative) = blob_relative else {
+            return Err(AppError::Storage(format!(
+                "clipboard item not found: {}",
+                id
+            )));
+        };
+
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| AppError::Storage(format!("failed to begin delete: {}", e)))?;
+
+        tx.execute("DELETE FROM clipboard_fts WHERE rowid = ?1", params![id])
+            .map_err(|e| AppError::Storage(format!("failed to delete FTS row: {}", e)))?;
+
+        tx.execute("DELETE FROM clipboard_item WHERE id = ?1", params![id])
+            .map_err(|e| AppError::Storage(format!("failed to delete item: {}", e)))?;
+
+        tx.commit()
+            .map_err(|e| AppError::Storage(format!("failed to commit delete: {}", e)))?;
+
+        if hard {
+            if let Some(relative) = blob_relative {
+                let absolute = self.data_dir.join(relative);
+                if let Err(e) = std::fs::remove_file(&absolute) {
+                    // blob 已不在不影响删除结果，只记录诊断
+                    log::warn!("failed to remove blob for id={}: {}", id, e);
+                }
+            }
+        }
+
+        log::debug!("clipboard item deleted: id={}, hard={}", id, hard);
+        Ok(())
+    }
+
+    /// 只读路径专用 open：跳过 FTS 一致性全表计数（S5）
+    ///
+    /// - `user_version == 0`（库从未迁移，例如监听线程初始化失败）→ 先迁移再读，保证空库是空态而非报错
+    ///   该分支只在「库从未迁移」的冷启动窗口内写一次；正常运行时库已是当前版本，读路径不产生任何写
+    /// - `user_version == SCHEMA_VERSION` → 不执行任何写操作
+    /// - 其余版本 → `storage.error`
+    pub fn open_readonly_at(db_path: &Path) -> Result<Self, AppError> {
+        let data_dir = db_path
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| AppError::Storage("invalid database path".to_string()))?;
+
+        std::fs::create_dir_all(&data_dir)
+            .map_err(|e| AppError::Storage(format!("failed to create data directory: {}", e)))?;
+
+        let conn = Connection::open(db_path)
+            .map_err(|e| AppError::Storage(format!("failed to open database: {}", e)))?;
+        Self::configure(&conn)?;
+
+        let mut storage = Self { conn, data_dir };
+        let version = storage.read_user_version()?;
+
+        if version == 0 {
+            // 并发首读时另一个连接可能已抢先完成迁移：失败后再读一次版本，已是当前版本则放行
+            if let Err(err) = storage.migrate() {
+                if storage.read_user_version()? != SCHEMA_VERSION {
+                    return Err(err);
+                }
+            }
+        } else if version != SCHEMA_VERSION {
+            return Err(AppError::Storage(format!(
+                "unsupported schema version: {}",
+                version
+            )));
+        }
+
+        Ok(storage)
+    }
+
+    fn read_user_version(&self) -> Result<i64, AppError> {
+        self.conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(|e| AppError::Storage(format!("failed to read user_version: {}", e)))
+    }
+}
+
+/// 读一列并按 `AppError` 包装错误
+fn column<T: FromSql>(row: &Row<'_>, idx: usize) -> Result<T, AppError> {
+    row.get(idx)
+        .map_err(|e| AppError::Storage(format!("failed to read column {}: {}", idx, e)))
+}
+
+/// DB 中的 kind 文本 → `ClipKind`
+fn kind_from_db(text: &str) -> Result<ClipKind, AppError> {
+    match text {
+        "text" => Ok(ClipKind::Text),
+        "html" => Ok(ClipKind::Html),
+        "rtf" => Ok(ClipKind::Rtf),
+        "image" => Ok(ClipKind::Image),
+        "files" => Ok(ClipKind::Files),
+        other => Err(AppError::Storage(format!("unknown clip kind: {}", other))),
+    }
+}
+
+/// 列表行 → `ClipboardItem`
+fn map_list_item(row: &Row<'_>) -> Result<ClipboardItem, AppError> {
+    let kind_text: String = column(row, 1)?;
+    Ok(ClipboardItem {
+        id: column(row, 0)?,
+        kind: kind_from_db(&kind_text)?,
+        preview: column(row, 2)?,
+        source_app: column(row, 3)?,
+        created_at: column(row, 4)?,
+        last_copied_at: column(row, 5)?,
+        copy_count: column(row, 6)?,
+        pinned: column::<i64>(row, 7)? != 0,
+        sensitive: column::<i64>(row, 8)? != 0,
+        truncated: column::<i64>(row, 9)? != 0,
+        byte_size: column(row, 10)?,
+        thumb_path: column(row, 11)?,
+    })
+}
+
+/// 详情行 → `ClipboardDetail`
+fn map_detail(row: &Row<'_>, data_dir: &Path) -> Result<ClipboardDetail, AppError> {
+    let kind_text: String = column(row, 1)?;
+    let file_list_json: Option<String> = column(row, 6)?;
+    let blob_relative: Option<String> = column(row, 7)?;
+
+    // 文件列表解析失败不阻断详情展示，降级为空
+    let file_list = match file_list_json {
+        Some(json) => match serde_json::from_str::<Vec<String>>(&json) {
+            Ok(files) => Some(files),
+            Err(e) => {
+                log::warn!("failed to parse file_list: {}", e);
+                None
+            }
+        },
+        None => None,
+    };
+    let file_exists = file_list
+        .as_ref()
+        .map(|files| files.iter().map(|p| Path::new(p).exists()).collect());
+
+    Ok(ClipboardDetail {
+        id: column(row, 0)?,
+        kind: kind_from_db(&kind_text)?,
+        preview: column(row, 2)?,
+        text_body: column(row, 3)?,
+        html: column(row, 4)?,
+        rtf: column(row, 5)?,
+        file_list,
+        file_exists,
+        blob_path: blob_relative.map(|rel| data_dir.join(rel).to_string_lossy().into_owned()),
+        thumb_path: column(row, 8)?,
+        byte_size: column(row, 9)?,
+        created_at: column(row, 10)?,
+        last_copied_at: column(row, 11)?,
+        copy_count: column(row, 12)?,
+        pinned: column::<i64>(row, 13)? != 0,
+        truncated: column::<i64>(row, 14)? != 0,
+        source_app: column(row, 15)?,
+    })
 }
 
 /// 写图片 blob：`blobs\<hash 前两位>\<hash>.<ext>`，返回相对数据目录的路径
@@ -793,5 +1143,381 @@ mod tests {
             Err(e) => panic!("failed to read user_version: {}", e),
         };
         assert_eq!(version_again, SCHEMA_VERSION);
+    }
+
+    fn set_time(storage: &ClipboardStorage, id: i64, at: i64) {
+        if let Err(e) = storage.conn.execute(
+            "UPDATE clipboard_item SET last_copied_at = ?1 WHERE id = ?2",
+            params![at, id],
+        ) {
+            panic!("failed to set last_copied_at: {}", e);
+        }
+    }
+
+    fn list_ids(storage: &ClipboardStorage, query_text: &str, filter: ClipFilter) -> Vec<i64> {
+        match storage.list(query_text, filter, 50, 0) {
+            Ok((items, _)) => items.into_iter().map(|item| item.id).collect(),
+            Err(e) => panic!("list failed: {}", e),
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 空库列表返回空数组与零总数() {
+        let storage = open_test_storage();
+        match storage.list("", ClipFilter::All, 50, 0) {
+            Ok((items, total)) => {
+                assert!(items.is_empty());
+                assert_eq!(total, 0);
+            }
+            Err(e) => panic!("list on empty db failed: {}", e),
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 列表按置顶与最近复制时间排序() {
+        let mut storage = open_test_storage();
+        let first = match storage.insert(&text_entry("第一条")) {
+            Ok(o) => o,
+            Err(e) => panic!("insert failed: {}", e),
+        };
+        let second = match storage.insert(&text_entry("第二条")) {
+            Ok(o) => o,
+            Err(e) => panic!("insert failed: {}", e),
+        };
+        let third = match storage.insert(&text_entry("第三条")) {
+            Ok(o) => o,
+            Err(e) => panic!("insert failed: {}", e),
+        };
+
+        set_time(&storage, first.id(), 1_000);
+        set_time(&storage, second.id(), 3_000);
+        set_time(&storage, third.id(), 2_000);
+
+        assert_eq!(
+            list_ids(&storage, "", ClipFilter::All),
+            vec![second.id(), third.id(), first.id()]
+        );
+
+        // 置顶项无论时间多旧都在最前
+        if let Err(e) = storage.set_pinned(first.id(), true) {
+            panic!("set_pinned failed: {}", e);
+        }
+        assert_eq!(
+            list_ids(&storage, "", ClipFilter::All),
+            vec![first.id(), second.id(), third.id()]
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 相同复制时间按id倒序稳定() {
+        let mut storage = open_test_storage();
+        let first = match storage.insert(&text_entry("并列一")) {
+            Ok(o) => o,
+            Err(e) => panic!("insert failed: {}", e),
+        };
+        let second = match storage.insert(&text_entry("并列二")) {
+            Ok(o) => o,
+            Err(e) => panic!("insert failed: {}", e),
+        };
+        set_time(&storage, first.id(), 5_000);
+        set_time(&storage, second.id(), 5_000);
+
+        assert_eq!(
+            list_ids(&storage, "", ClipFilter::All),
+            vec![second.id(), first.id()]
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 筛选覆盖文本图片文件与收藏() {
+        let mut storage = open_test_storage();
+        let text = match storage.insert(&text_entry("普通文本")) {
+            Ok(o) => o,
+            Err(e) => panic!("insert failed: {}", e),
+        };
+        let html = match storage.insert(&ClipboardEntry {
+            content: ClipboardContent::Html("<b>富文本</b>".to_string()),
+            preview: "富文本".to_string(),
+            truncated: false,
+            source_app: None,
+            source_title: None,
+        }) {
+            Ok(o) => o,
+            Err(e) => panic!("insert failed: {}", e),
+        };
+        let files = match storage.insert(&ClipboardEntry {
+            content: ClipboardContent::Files(vec!["C:\\a.txt".to_string()]),
+            preview: "1 个文件".to_string(),
+            truncated: false,
+            source_app: None,
+            source_title: None,
+        }) {
+            Ok(o) => o,
+            Err(e) => panic!("insert failed: {}", e),
+        };
+
+        assert_eq!(
+            list_ids(&storage, "", ClipFilter::Text),
+            vec![html.id(), text.id()]
+        );
+        assert!(list_ids(&storage, "", ClipFilter::Image).is_empty());
+        assert_eq!(list_ids(&storage, "", ClipFilter::Files), vec![files.id()]);
+
+        if let Err(e) = storage.set_pinned(files.id(), true) {
+            panic!("set_pinned failed: {}", e);
+        }
+        assert_eq!(
+            list_ids(&storage, "", ClipFilter::Favorites),
+            vec![files.id()]
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 分页总数与页大小一致() {
+        let mut storage = open_test_storage();
+        for index in 0..5 {
+            let entry = text_entry(&format!("分页条目{}", index));
+            if let Err(e) = storage.insert(&entry) {
+                panic!("insert failed: {}", e);
+            }
+        }
+
+        match storage.list("", ClipFilter::All, 2, 0) {
+            Ok((items, total)) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(total, 5);
+            }
+            Err(e) => panic!("list failed: {}", e),
+        }
+
+        match storage.list("", ClipFilter::All, 2, 4) {
+            Ok((items, total)) => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(total, 5);
+            }
+            Err(e) => panic!("list failed: {}", e),
+        }
+
+        match storage.list("", ClipFilter::All, 2, 100) {
+            Ok((items, total)) => {
+                assert!(items.is_empty());
+                assert_eq!(total, 5);
+            }
+            Err(e) => panic!("list failed: {}", e),
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 详情返回正文且不存在时为空() {
+        let mut storage = open_test_storage();
+        let outcome = match storage.insert(&text_entry("详情正文内容")) {
+            Ok(o) => o,
+            Err(e) => panic!("insert failed: {}", e),
+        };
+
+        match storage.get(outcome.id()) {
+            Ok(Some(detail)) => {
+                assert_eq!(detail.text_body.as_deref(), Some("详情正文内容"));
+                assert_eq!(detail.preview, "详情正文内容");
+            }
+            Ok(None) => panic!("detail should exist"),
+            Err(e) => panic!("get failed: {}", e),
+        }
+
+        match storage.get(99_999) {
+            Ok(None) => {}
+            Ok(Some(_)) => panic!("detail should not exist"),
+            Err(e) => panic!("get failed: {}", e),
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 删除同时清理fts且不存在时报错() {
+        let mut storage = open_test_storage();
+        let outcome = match storage.insert(&text_entry("待删除内容")) {
+            Ok(o) => o,
+            Err(e) => panic!("insert failed: {}", e),
+        };
+
+        if let Err(e) = storage.delete(outcome.id(), false) {
+            panic!("delete failed: {}", e);
+        }
+
+        let fts_rows: i64 = match storage.conn.query_row(
+            "SELECT COUNT(*) FROM clipboard_fts WHERE rowid = ?1",
+            params![outcome.id()],
+            |row| row.get(0),
+        ) {
+            Ok(count) => count,
+            Err(e) => panic!("failed to count fts rows: {}", e),
+        };
+        assert_eq!(fts_rows, 0);
+        assert_eq!(count_items(&storage), 0);
+
+        assert!(storage.delete(outcome.id(), false).is_err());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn fts搜索时置顶项仍在最前() {
+        let mut storage = open_test_storage();
+        let plain = match storage.insert(&text_entry("会议纪要草稿")) {
+            Ok(o) => o,
+            Err(e) => panic!("insert failed: {}", e),
+        };
+        let pinned = match storage.insert(&text_entry("会议纪要终稿")) {
+            Ok(o) => o,
+            Err(e) => panic!("insert failed: {}", e),
+        };
+
+        set_time(&storage, plain.id(), 9_000);
+        set_time(&storage, pinned.id(), 1_000);
+        if let Err(e) = storage.set_pinned(pinned.id(), true) {
+            panic!("set_pinned failed: {}", e);
+        }
+
+        let ids = list_ids(&storage, "会议纪要", ClipFilter::All);
+        assert_eq!(ids.first().copied(), Some(pinned.id()));
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 只读打开未迁移的库会先建表() {
+        let dir = std::env::temp_dir().join(format!("quickwin-readonly-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db_path = dir.join("quickwin.db");
+
+        let storage = match ClipboardStorage::open_readonly_at(&db_path) {
+            Ok(storage) => storage,
+            Err(e) => panic!("readonly open failed: {}", e),
+        };
+
+        match storage.list("", ClipFilter::All, 50, 0) {
+            Ok((items, total)) => {
+                assert!(items.is_empty());
+                assert_eq!(total, 0);
+            }
+            Err(e) => panic!("list on fresh db failed: {}", e),
+        }
+
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 硬删除同时移除blob文件() {
+        let mut storage = open_test_storage();
+        let outcome = match storage.insert(&ClipboardEntry {
+            content: ClipboardContent::Image {
+                data: vec![0x89, 0x50, 0x4e, 0x47],
+                format: ImageFormat::Png,
+            },
+            preview: "图片".to_string(),
+            truncated: false,
+            source_app: None,
+            source_title: None,
+        }) {
+            Ok(o) => o,
+            Err(e) => panic!("insert failed: {}", e),
+        };
+
+        let relative: Option<String> = match storage.conn.query_row(
+            "SELECT blob_path FROM clipboard_item WHERE id = ?1",
+            params![outcome.id()],
+            |row| row.get(0),
+        ) {
+            Ok(value) => value,
+            Err(e) => panic!("failed to read blob_path: {}", e),
+        };
+        let relative = match relative {
+            Some(path) => path,
+            None => panic!("image item should have blob_path"),
+        };
+        let absolute = storage.data_dir.join(&relative);
+        assert!(absolute.exists(), "blob should be written before delete");
+
+        if let Err(e) = storage.delete(outcome.id(), true) {
+            panic!("delete failed: {}", e);
+        }
+        assert!(!absolute.exists(), "hard delete must remove blob file");
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 千条数据搜索查询在五十毫秒内() {
+        use std::time::{Duration, Instant};
+
+        let mut storage = open_test_storage();
+        for index in 0..1000 {
+            let entry = text_entry(&format!(
+                "会议纪要 第 {} 条，正文内容 sample body {}",
+                index, index
+            ));
+            if let Err(e) = storage.insert(&entry) {
+                panic!("seed insert failed: {}", e);
+            }
+        }
+
+        // 预热：排除首次 prepare 的开销
+        let _ = storage.list("会议纪要", ClipFilter::All, 50, 0);
+        let _ = storage.list("会", ClipFilter::All, 50, 0);
+
+        let mut fts = Vec::new();
+        let mut like = Vec::new();
+        for _ in 0..10 {
+            let start = Instant::now();
+            if let Err(e) = storage.list("会议纪要", ClipFilter::All, 50, 0) {
+                panic!("fts query failed: {}", e);
+            }
+            fts.push(start.elapsed());
+
+            let start = Instant::now();
+            if let Err(e) = storage.list("会", ClipFilter::All, 50, 0) {
+                panic!("like query failed: {}", e);
+            }
+            like.push(start.elapsed());
+        }
+
+        fts.sort();
+        like.sort();
+        let fts_median = fts[fts.len() / 2];
+        let like_median = like[like.len() / 2];
+
+        assert!(
+            fts_median < Duration::from_millis(50),
+            "FTS median too slow: {:?}",
+            fts_median
+        );
+        assert!(
+            like_median < Duration::from_millis(50),
+            "LIKE median too slow: {:?}",
+            like_median
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 纯标点查询回退like不报错() {
+        let mut storage = open_test_storage();
+        if let Err(e) = storage.insert(&text_entry("100% 完成")) {
+            panic!("insert failed: {}", e);
+        }
+
+        match storage.list("...", ClipFilter::All, 50, 0) {
+            Ok((items, total)) => {
+                assert!(items.is_empty());
+                assert_eq!(total, 0);
+            }
+            Err(e) => panic!("punctuation query failed: {}", e),
+        }
     }
 }

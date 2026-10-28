@@ -321,3 +321,30 @@
 
 - 少数场景焦点恢复失败（如某些全屏应用），需要用户手动点击。
 - 无法实现「双击 Ctrl 唤起」这类需求（v2 若要，需重新评估）。
+
+---
+
+## ADR-0013 启用 Tauri `protocol-asset` feature 加载 blob 图片
+
+**状态**：已采纳（T-204）
+
+**背景**：剪贴板图片预览需要让 WebView 直接读取 `%APPDATA%\com.quickwin.app\blobs\` 下的文件。
+UI-SPEC §10 禁止 base64 内联；Tauri 2 提供 asset 自定义协议。
+
+**决策**：
+
+- `src-tauri/Cargo.toml` 的 `tauri` 增加 `protocol-asset` feature。
+- `tauri.conf.json` 开启 `security.assetProtocol.enable`，scope 为 `"$APPDATA/blobs/**"`。
+- 二者缺一不可：只开配置不会注册协议处理器（源码里由 `#[cfg(feature = "protocol-asset")]` 门控），
+  只开 feature 不会放行路径。
+
+**理由**：
+
+- `$APPDATA` 解析为 `app_data_dir()` = `dirs::data_dir()/identifier`，已经包含 identifier；
+  scope 若再写一层 `com.quickwin.app` 会双重目录，`is_allowed` 恒 false（403）。
+- 不是新增 crate，只是启用既有依赖的 feature，因此不新开 ADR 之外的依赖决策。
+
+**代价**：
+
+- 引入传递依赖 `http-range`（Tauri 官方默认组合，非自选）。
+- 需要保持 `storage.rs` 落盘目录与 scope 一致，二者任一变更都要同步改。`

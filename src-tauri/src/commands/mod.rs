@@ -1,3 +1,5 @@
+pub mod clipboard;
+
 use crate::error::AppError;
 use crate::services::hotkey::{HotkeyAction, HotkeyManager, HotkeyStatus};
 use crate::services::window::{

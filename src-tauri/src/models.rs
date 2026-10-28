@@ -106,3 +106,46 @@ pub struct Page<T> {
     pub page: usize,
     pub page_size: usize,
 }
+
+/// 剪贴板列表筛选（与 UI 的 chip 一一对应）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipFilter {
+    #[default]
+    All,
+    Text,
+    Image,
+    Files,
+    Favorites,
+}
+
+/// `clipboard_list` 返回结构
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClipboardListResult {
+    pub items: Vec<ClipboardItem>,
+    pub total: i64,
+}
+
+/// `clipboard_get` 返回结构（详情比列表多正文与 blob 绝对路径）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClipboardDetail {
+    pub id: i64,
+    pub kind: ClipKind,
+    pub preview: String,
+    pub text_body: Option<String>,
+    pub html: Option<String>,
+    pub rtf: Option<String>,
+    pub file_list: Option<Vec<String>>,
+    /// 与 `file_list` 一一对应；文件仍存在为 true（缺失项在预览区标红）
+    pub file_exists: Option<Vec<bool>>,
+    /// 图片 blob 的绝对路径（前端用 `convertFileSrc` 转换）
+    pub blob_path: Option<String>,
+    pub thumb_path: Option<String>,
+    pub byte_size: i64,
+    pub created_at: i64,
+    pub last_copied_at: i64,
+    pub copy_count: i64,
+    pub pinned: bool,
+    pub truncated: bool,
+    pub source_app: Option<String>,
+}
