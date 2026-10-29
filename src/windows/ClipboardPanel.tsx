@@ -339,10 +339,17 @@ export function ClipboardPanel() {
         break;
       }
       case 'paste':
-        showHint('粘贴功能开发中（T-205 实现）');
+        if (!current) break;
+        ipc.clipboardActivate(current.id, 'paste').catch((err) => {
+          setError(errorMessage(err));
+        });
         break;
       case 'copy':
-        showHint('仅复制功能开发中（T-205 实现）');
+        if (!current) break;
+        ipc
+          .clipboardActivate(current.id, 'copy')
+          .then(() => showHint('已复制'))
+          .catch((err) => setError(errorMessage(err)));
         break;
       case 'filter-next':
         setFilter((prev) => cycleFilter(prev, 1));

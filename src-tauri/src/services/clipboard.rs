@@ -6,7 +6,7 @@
 use crate::error::AppError;
 use crate::platform::clipboard::{get_sequence_number, read_clipboard_content, ClipboardEntry};
 use crate::platform::focus::capture_foreground;
-use crate::services::storage::ClipboardStorage;
+use crate::services::storage::{content_hash, ClipboardStorage};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -58,6 +58,126 @@ impl ThrottledEmitter {
     }
 }
 
+/// 粘贴抑制窗口（PRD 6.4：1.5s）
+pub const PASTE_SUPPRESS_WINDOW: Duration = Duration::from_millis(1500);
+
+/// 粘贴写入时允许的序列号增量上限（格式数 + 其他程序干扰的余量）
+const PENDING_SEQ_DELTA: u32 = 64;
+
+/// 粘贴抑制状态（进程内，不持久化）
+///
+/// 写入剪贴板前 `begin` 打开窗口（记录起始序列号），写入后 `seal` 记录精确区间；
+/// 监听线程按「序列号区间为主、内容 hash 兜底」跳过回声，不插入、不发事件、不刷新顺序。
+#[derive(Clone)]
+pub struct PasteSuppression {
+    inner: Arc<Mutex<SuppressState>>,
+}
+
+#[derive(Debug, Default)]
+struct SuppressState {
+    pending_from: Option<u32>,
+    ranges: Vec<(u32, u32)>,
+    hashes: Vec<String>,
+    expires: Option<Instant>,
+}
+
+impl PasteSuppression {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(SuppressState::default())),
+        }
+    }
+
+    pub fn handle(&self) -> Self {
+        self.clone()
+    }
+
+    /// 写剪贴板前调用：打开抑制窗口并记录起始序列号
+    pub fn begin(&self, seq_before: u32, now: Instant) {
+        if let Ok(mut state) = self.inner.lock() {
+            Self::reset_if_expired(&mut state, now);
+            state.pending_from = Some(seq_before);
+            state.expires = Some(now + PASTE_SUPPRESS_WINDOW);
+        }
+    }
+
+    /// 写剪贴板后调用：封印精确序列号区间，并登记内容 hash 兜底
+    pub fn seal(&self, seq_before: u32, seq_after: u32, hash: Option<String>, now: Instant) {
+        if let Ok(mut state) = self.inner.lock() {
+            Self::reset_if_expired(&mut state, now);
+            state.pending_from = None;
+            state.expires = Some(now + PASTE_SUPPRESS_WINDOW);
+            if seq_after.wrapping_sub(seq_before) > 0 {
+                state.ranges.push((seq_before, seq_after));
+            }
+            if let Some(hash) = hash {
+                state.hashes.push(hash);
+            }
+        }
+    }
+
+    /// 追加 hash（还原原剪贴板时使用）
+    pub fn add_hash(&self, hash: String, now: Instant) {
+        if let Ok(mut state) = self.inner.lock() {
+            Self::reset_if_expired(&mut state, now);
+            state.hashes.push(hash);
+            state.expires = Some(now + PASTE_SUPPRESS_WINDOW);
+        }
+    }
+
+    /// 序列号是否落在抑制窗口内（读取剪贴板前调用，命中则无需读取）
+    pub fn should_skip_seq(&self, seq: u32, now: Instant) -> bool {
+        let Ok(mut state) = self.inner.lock() else {
+            return false;
+        };
+        Self::reset_if_expired(&mut state, now);
+        if state.expires.is_none() {
+            return false;
+        }
+
+        if let Some(from) = state.pending_from {
+            let delta = seq.wrapping_sub(from);
+            if (1..=PENDING_SEQ_DELTA).contains(&delta) {
+                return true;
+            }
+        }
+
+        state
+            .ranges
+            .iter()
+            .any(|(start, end)| seq_in_range(seq, *start, *end))
+    }
+
+    /// 内容 hash 是否命中抑制（读回内容后兜底）
+    pub fn should_skip_hash(&self, hash: &str, now: Instant) -> bool {
+        let Ok(mut state) = self.inner.lock() else {
+            return false;
+        };
+        Self::reset_if_expired(&mut state, now);
+        state.expires.is_some() && state.hashes.iter().any(|item| item == hash)
+    }
+
+    fn reset_if_expired(state: &mut SuppressState, now: Instant) {
+        let expired = state.expires.map(|at| now >= at).unwrap_or(true);
+        if expired {
+            *state = SuppressState::default();
+        }
+    }
+}
+
+impl Default for PasteSuppression {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// wrapping 语义的闭区间包含判断（序列号会回绕）
+fn seq_in_range(seq: u32, start: u32, end: u32) -> bool {
+    let span = end.wrapping_sub(start);
+    let offset = seq.wrapping_sub(start);
+    offset <= span
+}
+
 /// 剪贴板监听器
 ///
 /// 管理后台监听线程的生命周期，Drop 时自动停止线程。
@@ -69,7 +189,9 @@ pub struct ClipboardMonitor {
 
 impl ClipboardMonitor {
     /// 启动剪贴板监听
-    pub fn start(app: AppHandle) -> Result<Self, AppError> {
+    ///
+    /// `suppression` 由 paste 流程共享，用于跳过粘贴写入产生的回声。
+    pub fn start(app: AppHandle, suppression: PasteSuppression) -> Result<Self, AppError> {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_clone = stop_flag.clone();
 
@@ -103,6 +225,12 @@ impl ClipboardMonitor {
                 }
                 last_seq = current_seq;
 
+                // 粘贴回声：序列号命中抑制窗口时不读取、不入库
+                if suppression.should_skip_seq(current_seq, Instant::now()) {
+                    log::debug!("clipboard change suppressed by paste: seq={}", current_seq);
+                    continue;
+                }
+
                 // 读取剪贴板，失败时动态重试：立即 → 10ms → 50ms
                 let entry = match read_with_retry(&stop_clone) {
                     Some(entry) => entry,
@@ -111,6 +239,18 @@ impl ClipboardMonitor {
 
                 let mut entry = entry;
                 attach_source_app(&mut entry);
+
+                // 序列号覆盖不到时（例如范围 seal 晚于轮询），按内容 hash 兜底
+                match content_hash(&entry.content) {
+                    Ok(hash) if suppression.should_skip_hash(&hash, Instant::now()) => {
+                        log::debug!(
+                            "clipboard change suppressed by hash: kind={}",
+                            entry.content.kind()
+                        );
+                        continue;
+                    }
+                    _ => {}
+                }
 
                 match storage.insert(&entry) {
                     Ok(outcome) => {
@@ -213,5 +353,61 @@ mod tests {
             Err(e) => panic!("lock poisoned: {}", e),
         };
         assert!(guard.is_none());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 粘贴抑制pending与区间命中() {
+        let suppression = PasteSuppression::new();
+        let now = Instant::now();
+
+        suppression.begin(100, now);
+        assert!(suppression.should_skip_seq(101, now));
+        assert!(!suppression.should_skip_seq(100, now));
+        assert!(!suppression.should_skip_seq(165, now));
+
+        suppression.seal(100, 104, None, now);
+        assert!(suppression.should_skip_seq(104, now));
+        assert!(!suppression.should_skip_seq(105, now));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 粘贴抑制区间支持序列号回绕() {
+        let suppression = PasteSuppression::new();
+        let now = Instant::now();
+
+        suppression.begin(0xFFFF_FFFE, now);
+        suppression.seal(0xFFFF_FFFE, 2, None, now);
+
+        assert!(suppression.should_skip_seq(0, now));
+        assert!(suppression.should_skip_seq(2, now));
+        assert!(!suppression.should_skip_seq(3, now));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 粘贴抑制过期后失效() {
+        let suppression = PasteSuppression::new();
+        let now = Instant::now();
+        let later = now + PASTE_SUPPRESS_WINDOW + Duration::from_millis(1);
+
+        suppression.seal(10, 12, Some("abc".to_string()), now);
+        assert!(suppression.should_skip_seq(11, now));
+        assert!(suppression.should_skip_hash("abc", now));
+
+        assert!(!suppression.should_skip_seq(11, later));
+        assert!(!suppression.should_skip_hash("abc", later));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 粘贴抑制hash只匹配登记内容() {
+        let suppression = PasteSuppression::new();
+        let now = Instant::now();
+
+        suppression.seal(20, 21, Some("hash-a".to_string()), now);
+        assert!(suppression.should_skip_hash("hash-a", now));
+        assert!(!suppression.should_skip_hash("hash-b", now));
     }
 }

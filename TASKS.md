@@ -16,7 +16,8 @@
 
 ## 当前焦点
 
-**M1 已完成**（2026-10-27）。**M2 剪贴板历史**推进中：T-201/T-202/T-203/T-204 已完成，下一个是 T-205（激活与粘贴，complex，需先写 mini-design）。
+**M1 已完成**（2026-10-27）。**M2 剪贴板历史**推进中：T-201～T-205 已完成，下一个候选是 T-206
+（保留策略，依赖 T-107；T-106/T-107/T-108 尚未勾选，需先补齐设置与 IPC 契约）或先补 T-103 评审记录。
 
 **注意**：T-101 至 T-105 均已完成，M1 出口条件满足（热键呼出/隐藏、焦点恢复、SendInput 全部手工验证待用户执行）。
 
@@ -317,7 +318,7 @@
   ↑↓/PgUp/PgDn、Ctrl+P 置顶与 📌/×N/分隔线、Delete/Shift+Delete 与 blob 清理、截图预览（asset 协议）、
   DIB 占位文案、IME 组合期按键、Esc 关闭、1000 条下 A/B 耗时
 
-### [ ] T-205 [complex] 激活与粘贴
+### [x] T-205 [complex] 激活与粘贴（2026-10-29）
 - 流程：隐藏浮层 → 恢复前台窗口 → 将条目写入剪贴板（全格式）→ 抑制监听（hash + 1.5s 窗口）→ `Ctrl+V`
 - **不新增历史条目、不改变历史顺序**（选中即用，不污染）
 - 粘贴后条目**保留在系统剪贴板**（符合 Win+V 习惯，便于再次手动粘贴）
@@ -326,6 +327,29 @@
 
 验收：从历史选一条粘到记事本光标处，内容正确且历史列表无新增/无重排；管理员窗口下给出提示且剪贴板可用；连续粘贴 5 条内容互不串；emoji 与多行文本正确。
 依赖：T-204、T-105、T-104。
+
+**实现备注（2026-10-29）**：
+- `platform/clipboard.rs` 新增 `write_clipboard_content`：单次会话写入条目全部可写格式；HTML 重拼
+  `HTML Format` 头 + 纯文本、RTF + 纯文本、PNG 注册格式 + WIC 合成的 `CF_DIB`、文件 `CF_HDROP`；
+  失败时保留已成功格式，不清空剪贴板
+- `platform/imaging.rs`（新增）WIC PNG→BGRA→DIB：alpha 统一 0xFF、bottom-up 行序
+- `services/paste.rs`（新增）编排：`hide_for_paste`（同步隐藏+restore，不走异步动画）→ `begin`
+  → 写剪贴板 → `seal` → `Ctrl+V`；`paste_lock` 序列化并发激活，还原线程同样持锁并完整 begin/seal
+- 抑制：`PasteSuppression` 序列号区间为主（wrapping 包含）+ 规范化 `content_hash` 兜底，1.5s 过期；
+  监听线程命中即跳过，不插入、不发事件、不刷新 `last_copied_at`
+- 降级：提权预检 / 未捕获前台窗口 → 不隐藏、只写剪贴板 + `app://toast`；restore 或 `send_paste`
+  失败 → 已写剪贴板后重新展示面板 + toast「已复制，请手动粘贴」；写失败 → resume + 错误提示
+- 设置：`clipboard_set_restore_after_paste` 进程内开关（默认关），开启时粘贴前快照、Ctrl+V 后
+  300ms 写回（seq 又变则放弃）；持久化留 T-107、UI 留 T-601
+- 前端：Enter → `clipboard_activate(id,'paste')`，Ctrl+Enter → `'copy'`；App 根监听 `app://toast`
+- 偏差：T-202 每条约只存 1 种内容，无法还原原剪贴板全部并行格式；>8MB 图片无 blob 无法粘贴；
+  「目标控件不接受合成按键」v1 无法探测（记入 T-703）；DIB 不做转 PNG
+- 测试：Rust 70 passed / 1 ignored（真实剪贴板 round-trip 手测），前端 43 passed；`verify` 全绿
+- 交叉评审：doubao-seed-2.1-pro PASS（第 2 轮；第 1 轮 FAIL 的三项已修复/登记偏差），
+  详见 `docs/reviews/T-205.md` 与 `docs/reviews/T-205-design.md`
+- 待真机手测：记事本/Chrome/VS Code/资源管理器下的文本、emoji、多行、图片、文件列表粘贴；
+  历史无新增/无重排；连续 5 条互不串；管理员窗口降级；关闭目标窗口后 restore 降级；
+  还原开关开启后 300ms 恢复原剪贴板且不重排
 
 ### [ ] T-206 保留策略与容量治理
 - TTL 15 天，按 `last_copied_at`；置顶豁免

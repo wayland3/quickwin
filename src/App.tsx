@@ -7,11 +7,11 @@ function App() {
   const [pingResult, setPingResult] = useState<string>('');
   const [error, setError] = useState<string>('');
   const [mode, setMode] = useState<string>('');
-  const [toast, setToast] = useState<string>('');
+  const [toast, setToast] = useState<{ message: string; level: string } | null>(null);
 
   useEffect(() => {
     if (!toast) return;
-    const timer = window.setTimeout(() => setToast(''), 4000);
+    const timer = window.setTimeout(() => setToast(null), 4000);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
@@ -60,7 +60,17 @@ function App() {
       'clipboard://insert-error',
       (event) => {
         const message = event.payload?.message || '剪贴板记录失败';
-        setToast(message);
+        setToast({ message, level: 'error' });
+      },
+    );
+
+    // 后端降级提示（粘贴 / 仅复制）
+    const unlistenToast = listen<{ level?: string; message?: string }>(
+      'app://toast',
+      (event) => {
+        const message = event.payload?.message;
+        if (!message) return;
+        setToast({ message, level: event.payload?.level ?? 'info' });
       },
     );
 
@@ -70,6 +80,7 @@ function App() {
       unlistenHidden.then(f => f());
       unlistenHotkey.then(f => f());
       unlistenInsertError.then(f => f());
+      unlistenToast.then(f => f());
       window.removeEventListener('keydown', handleKeyDown);
     };
   }, []);
@@ -79,9 +90,13 @@ function App() {
       {toast && (
         <div
           role="alert"
-          className="fixed bottom-4 left-1/2 -translate-x-1/2 rounded-md bg-red-600/90 px-4 py-2 text-sm text-white shadow-lg"
+          className={
+            toast.level === 'error'
+              ? 'fixed bottom-4 left-1/2 -translate-x-1/2 rounded-md bg-red-600/90 px-4 py-2 text-sm text-white shadow-lg'
+              : 'fixed bottom-4 left-1/2 -translate-x-1/2 rounded-md bg-slate-700/90 px-4 py-2 text-sm text-white shadow-lg'
+          }
         >
-          {toast}
+          {toast.message}
         </div>
       )}
 

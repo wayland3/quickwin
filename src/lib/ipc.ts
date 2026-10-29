@@ -65,4 +65,12 @@ export const ipc = {
   async clipboardDelete(id: number, hard: boolean): Promise<void> {
     return invoke<void>('clipboard_delete', { id, hard });
   },
+
+  async clipboardActivate(id: number, mode: 'paste' | 'copy'): Promise<void> {
+    return invoke<void>('clipboard_activate', { id, mode });
+  },
+
+  async clipboardSetRestoreAfterPaste(enabled: boolean): Promise<void> {
+    return invoke<void>('clipboard_set_restore_after_paste', { enabled });
+  },
 };

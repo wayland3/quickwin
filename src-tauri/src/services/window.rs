@@ -6,7 +6,7 @@ use crate::platform::focus::{
 };
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
-use tauri::{Emitter, Window};
+use tauri::{Emitter, WebviewWindow, Window};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayState {
@@ -55,6 +55,18 @@ pub struct OverlayManager {
     hide_on_blur: Arc<Mutex<bool>>,
     prefers_reduced_motion: Arc<Mutex<bool>>,
     prev_window: Arc<Mutex<Option<ForegroundWindow>>>,
+    /// 粘贴流程互斥：并发激活直接拒绝第二次
+    paste_lock: Arc<Mutex<()>>,
+}
+
+/// 粘贴前恢复焦点的结果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreOutcome {
+    Restored,
+    /// 触发浮层时没有捕获到前台窗口
+    NoTarget,
+    /// 目标窗口已关闭 / UIPI / 校验失败
+    Failed,
 }
 
 impl OverlayManager {
@@ -65,6 +77,7 @@ impl OverlayManager {
             hide_on_blur: Arc::new(Mutex::new(true)),
             prefers_reduced_motion: Arc::new(Mutex::new(false)),
             prev_window: Arc::new(Mutex::new(None)),
+            paste_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -225,6 +238,69 @@ impl OverlayManager {
         }
 
         Ok(())
+    }
+
+    /// 粘贴专用：同步隐藏 + 同步恢复焦点
+    ///
+    /// 不走 `hide` 的 80ms 动画线程，保证后续写剪贴板 / `Ctrl+V` 的时序可控。
+    pub fn hide_for_paste(&self, window: &WebviewWindow) -> RestoreOutcome {
+        {
+            let Ok(mut state) = self.state.lock() else {
+                return RestoreOutcome::Failed;
+            };
+            *state = OverlayState::Hidden;
+        }
+
+        let _ = window.emit("overlay://hidden", ());
+        if let Err(e) = window.hide() {
+            log::warn!("hide_for_paste: window.hide failed: {}", e);
+        }
+
+        // 给 DWM 一点时间真正撤下前台窗口，再恢复目标焦点
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        let prev = self.prev_window.lock().ok().and_then(|p| p.clone());
+        match prev {
+            None => RestoreOutcome::NoTarget,
+            Some(prev) => match restore(&prev, 150) {
+                Ok(()) => RestoreOutcome::Restored,
+                Err(e) => {
+                    log::warn!("hide_for_paste: restore failed: {}", e);
+                    RestoreOutcome::Failed
+                }
+            },
+        }
+    }
+
+    /// 降级时重新展示剪贴板面板（不重新 capture，保留 prev_window）
+    pub fn resume_clipboard(&self, window: &WebviewWindow) -> Result<(), AppError> {
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| AppError::Internal("lock poisoned".into()))?;
+            *state = OverlayState::Shown;
+        }
+        *self
+            .current_mode
+            .lock()
+            .map_err(|_| AppError::Internal("lock poisoned".into()))? =
+            Some(OverlayMode::Clipboard);
+
+        window.show()?;
+        let _ = window.set_focus();
+        let _ = window.emit("overlay://shown", "clipboard");
+        Ok(())
+    }
+
+    /// 当前记录的前台窗口（粘贴前做提权预检）
+    pub fn prev_window(&self) -> Option<ForegroundWindow> {
+        self.prev_window.lock().ok().and_then(|p| p.clone())
+    }
+
+    /// 重启粘贴流程的互斥锁（并发激活直接拒绝第二次）
+    pub fn paste_guard(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.paste_lock)
     }
 
     pub fn resize(&self, window: &Window, height: u32) -> Result<(), AppError> {

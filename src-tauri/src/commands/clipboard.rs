@@ -5,8 +5,11 @@
 // `spawn_blocking` 内开短生命期连接，锁与连接都不跨 await。
 
 use crate::error::AppError;
-use crate::models::{ClipFilter, ClipboardDetail, ClipboardListResult};
+use crate::models::{ClipFilter, ClipboardDetail, ClipboardListResult, PasteMode};
+use crate::services::clipboard::PasteSuppression;
+use crate::services::paste::PasteOptions;
 use crate::services::storage::{ClipboardStorage, DbPath};
+use crate::services::window::OverlayManager;
 use std::path::PathBuf;
 use tauri::Manager;
 
@@ -67,6 +70,46 @@ pub async fn clipboard_set_pinned(
     })
     .await
     .map_err(|e| AppError::Internal(format!("clipboard_set_pinned failed: {}", e)))?
+}
+
+/// 激活条目：写剪贴板 +（paste 时）发送 Ctrl+V
+///
+/// 整个流程含阻塞 Win32 调用，必须在 `spawn_blocking` 内执行。
+#[tauri::command]
+pub async fn clipboard_activate(
+    app: tauri::AppHandle,
+    id: i64,
+    mode: PasteMode,
+) -> Result<(), AppError> {
+    let path = db_path(&app)?;
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), AppError> {
+        let storage = ClipboardStorage::open_readonly_at(&path)?;
+        let detail = storage
+            .get(id)?
+            .ok_or_else(|| AppError::Storage(format!("clipboard item not found: {}", id)))?;
+
+        let manager = app.state::<OverlayManager>();
+        let suppression = app.state::<PasteSuppression>();
+        let options = app.state::<PasteOptions>();
+
+        crate::services::paste::activate(&app, &manager, &suppression, &options, detail, mode)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("clipboard_activate failed: {}", e)))?
+}
+
+/// 设置「粘贴后还原原剪贴板」（设置页在 T-601 接入）
+#[tauri::command]
+pub fn clipboard_set_restore_after_paste(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<(), AppError> {
+    let options = app
+        .try_state::<PasteOptions>()
+        .ok_or_else(|| AppError::Internal("paste options not configured".into()))?;
+    options.set_restore_after_paste(enabled);
+    Ok(())
 }
 
 /// 删除条目；`hard=true` 时连 blob 文件一起删

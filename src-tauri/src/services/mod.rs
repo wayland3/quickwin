@@ -1,6 +1,7 @@
 pub mod clipboard;
 pub mod hotkey;
 pub mod logging;
+pub mod paste;
 pub mod query;
 pub mod storage;
 pub mod tray;

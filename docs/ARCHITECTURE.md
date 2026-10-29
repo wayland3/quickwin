@@ -260,7 +260,7 @@ Rust 侧 `snake_case`，前端调用同名。所有返回统一 `Result<T, AppEr
 | `launcher_execute` | `{ key, action }` | `()` | action: `open`/`admin`/`reveal`/`copy_path` |
 | `clipboard_list` | `{ query, filter, limit, offset }` | `{ items, total }` | 列表只返回 `preview`，不含全文 |
 | `clipboard_get` | `{ id }` | `ClipboardDetail` | 全文/图片路径/文件列表 |
-| `clipboard_activate` | `{ id, mode }` | `()` | mode: `paste`/`copy` |
+| `clipboard_activate` | `{ id, mode }` | `()` | mode: `paste`/`copy`；降级用 `app://toast` 提示 |
 | `clipboard_set_pinned` | `{ id, pinned }` | `()` | — |
 | `clipboard_delete` | `{ id, hard }` | `()` | hard 时立即删 blob |
 | `clipboard_clear` | `{ include_pinned }` | `()` | 二次确认在前端做 |
@@ -376,15 +376,15 @@ DB 线程:
 ### 7.3 激活（粘贴）
 
 ```
-clipboard_activate(id, paste):
+clipboard_activate(id, mode):
   item = 读取完整内容（DB + blob）
-  overlay.hide()                        # 会触发失焦，注意不要重复处理
-  focus.restore(prev_hwnd, 150ms)
-  clipboard.write(item)                 # 全格式写入
-  suppress.watch(item.hash, 1500ms)     # 监听线程据此跳过
-  if paste:
+  seq0 = 剪贴板序列号；suppress.begin(seq0)   # 先打开抑制窗口，避免 250ms 轮询抢跑
+  overlay.hide_for_paste()                     # 同步隐藏 + 同步 restore，不走异步动画
+  clipboard.write(item)                        # 单次会话写全部可写格式
+  suppress.seal(seq0, seq1, item.hash)         # 记录精确区间 + hash 兜底，1.5s
+  if mode == paste:
       input.send_ctrl_v()
-      if focus restore 失败: emit toast("已复制，请手动粘贴")
+      if restore 失败 / 提权: resume 面板 + app://toast("已复制，请手动粘贴")
 ```
 
 顺序不能反：**先隐藏再恢复焦点**，否则焦点会被浮层抢回。

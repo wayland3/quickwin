@@ -119,6 +119,14 @@ pub enum ClipFilter {
     Favorites,
 }
 
+/// 激活方式：粘贴（Enter）或仅复制（Ctrl+Enter）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PasteMode {
+    Paste,
+    Copy,
+}
+
 /// `clipboard_list` 返回结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClipboardListResult {

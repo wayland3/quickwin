@@ -272,7 +272,7 @@ impl ClipboardStorage {
     /// - 新内容写入主表 + FTS，图片同时落盘 blob
     /// - 单事务提交，任一步失败自动回滚
     pub fn insert(&mut self, entry: &ClipboardEntry) -> Result<InsertOutcome, AppError> {
-        let hash = Self::compute_hash(entry)?;
+        let hash = content_hash(&entry.content)?;
         let kind = entry.content.kind();
         let preview = build_preview(&entry.preview);
         let now = now_ms()?;
@@ -375,46 +375,6 @@ impl ClipboardStorage {
             byte_size
         );
         Ok(InsertOutcome::Inserted(id))
-    }
-
-    /// 计算去重 hash：`sha256(kind + 规范化内容)`
-    ///
-    /// 规范化：
-    /// - 文本类：换行统一为 `\n`
-    /// - 文件列表：按路径排序后序列化，复制顺序不影响 hash
-    fn compute_hash(entry: &ClipboardEntry) -> Result<String, AppError> {
-        let mut hasher = Sha256::new();
-
-        match &entry.content {
-            ClipboardContent::Text(text) => {
-                hasher.update(b"text:");
-                hasher.update(normalize_newlines(text).as_bytes());
-            }
-            ClipboardContent::Html(html) => {
-                hasher.update(b"html:");
-                hasher.update(normalize_newlines(html).as_bytes());
-            }
-            ClipboardContent::Rtf(rtf) => {
-                hasher.update(b"rtf:");
-                hasher.update(normalize_newlines(rtf).as_bytes());
-            }
-            ClipboardContent::Image { data, format } => {
-                hasher.update(b"image:");
-                hasher.update(format.extension().as_bytes());
-                hasher.update(b":");
-                hasher.update(data);
-            }
-            ClipboardContent::Files(files) => {
-                hasher.update(b"files:");
-                let mut sorted = files.clone();
-                sorted.sort();
-                let json = serde_json::to_string(&sorted)
-                    .map_err(|e| AppError::Storage(format!("failed to serialize files: {}", e)))?;
-                hasher.update(json.as_bytes());
-            }
-        }
-
-        Ok(format!("{:x}", hasher.finalize()))
     }
 
     /// 列表查询：返回当前页条目与同条件总数
@@ -648,6 +608,45 @@ impl ClipboardStorage {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|e| AppError::Storage(format!("failed to read user_version: {}", e)))
     }
+}
+
+/// 计算内容 hash：`sha256(kind + 规范化内容)`
+///
+/// 规范化：文本类换行统一为 `\n`；文件列表按路径排序后序列化。
+/// 入库去重与粘贴抑制共用，保证两边口径一致。
+pub fn content_hash(content: &ClipboardContent) -> Result<String, AppError> {
+    let mut hasher = Sha256::new();
+
+    match content {
+        ClipboardContent::Text(text) => {
+            hasher.update(b"text:");
+            hasher.update(normalize_newlines(text).as_bytes());
+        }
+        ClipboardContent::Html(html) => {
+            hasher.update(b"html:");
+            hasher.update(normalize_newlines(html).as_bytes());
+        }
+        ClipboardContent::Rtf(rtf) => {
+            hasher.update(b"rtf:");
+            hasher.update(normalize_newlines(rtf).as_bytes());
+        }
+        ClipboardContent::Image { data, format } => {
+            hasher.update(b"image:");
+            hasher.update(format.extension().as_bytes());
+            hasher.update(b":");
+            hasher.update(data);
+        }
+        ClipboardContent::Files(files) => {
+            hasher.update(b"files:");
+            let mut sorted = files.clone();
+            sorted.sort();
+            let json = serde_json::to_string(&sorted)
+                .map_err(|e| AppError::Storage(format!("failed to serialize files: {}", e)))?;
+            hasher.update(json.as_bytes());
+        }
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// 读一列并按 `AppError` 包装错误
@@ -971,8 +970,8 @@ mod tests {
             source_title: None,
         };
         assert_eq!(
-            ClipboardStorage::compute_hash(&lf).ok(),
-            ClipboardStorage::compute_hash(&crlf).ok()
+            content_hash(&lf.content).ok(),
+            content_hash(&crlf.content).ok()
         );
 
         let files_a = ClipboardEntry {
@@ -990,8 +989,8 @@ mod tests {
             source_title: None,
         };
         assert_eq!(
-            ClipboardStorage::compute_hash(&files_a).ok(),
-            ClipboardStorage::compute_hash(&files_b).ok()
+            content_hash(&files_a.content).ok(),
+            content_hash(&files_b.content).ok()
         );
     }
 

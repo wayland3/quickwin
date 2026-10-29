@@ -5,12 +5,12 @@
 use crate::error::AppError;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
-use windows::Win32::Foundation::{HANDLE, HGLOBAL};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, CountClipboardFormats, EnumClipboardFormats, GetClipboardData, OpenClipboard,
-    RegisterClipboardFormatW,
+    CloseClipboard, CountClipboardFormats, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
+    OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
-use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 
 /// 获取剪贴板序列号
@@ -522,6 +522,193 @@ fn rtf_to_plain_text(rtf: &str) -> String {
     result.trim().to_string()
 }
 
+// ---------- 写入 ----------
+
+/// `HTML Format` 注册名
+const CF_HTML_NAME: &str = "HTML Format";
+/// `Rich Text Format` 注册名
+const CF_RTF_NAME: &str = "Rich Text Format";
+/// `PNG` 注册名
+const CF_PNG_NAME: &str = "PNG";
+/// DROPFILES 头部固定长度（pFiles 4 + pt 8 + fNC 4 + fWide 4）
+const DROPFILES_HEADER_LEN: usize = 20;
+
+/// 打开剪贴板，被占用时重试 3 次 × 20ms
+pub fn open_clipboard_with_retry() -> Result<ClipboardGuard, AppError> {
+    for attempt in 0..3u32 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        match open_clipboard() {
+            Ok(guard) => return Ok(guard),
+            Err(AppError::ClipboardBusy) if attempt < 2 => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(AppError::ClipboardBusy)
+}
+
+/// 将条目以原始格式写入系统剪贴板
+///
+/// 单次 `OpenClipboard` 会话内写入该条目全部可写格式；先完整构造载荷再清空剪贴板，
+/// 避免解码失败时把用户原剪贴板清掉。
+pub fn write_clipboard_content(content: &ClipboardContent) -> Result<(), AppError> {
+    let payloads = clipboard_payloads(content)?;
+    if payloads.is_empty() {
+        return Err(AppError::ClipboardRead);
+    }
+
+    let _guard = open_clipboard_with_retry()?;
+
+    // SAFETY: 已持有剪贴板所有权
+    unsafe { EmptyClipboard() }
+        .map_err(|e| AppError::Internal(format!("EmptyClipboard failed: {}", e)))?;
+
+    // 失败时保留已成功写入的格式（例如 PNG 已可用），不清空，避免把剪贴板变成空
+    for (format, bytes) in &payloads {
+        set_clipboard_bytes(*format, bytes)?;
+    }
+
+    Ok(())
+}
+
+/// 把内容展开为「格式 ID → 字节」列表（文本放最后，兼容只读文本的程序）
+fn clipboard_payloads(content: &ClipboardContent) -> Result<Vec<(u32, Vec<u8>)>, AppError> {
+    let mut payloads = Vec::new();
+
+    match content {
+        ClipboardContent::Text(text) => {
+            payloads.push((CF_UNICODETEXT, utf16_bytes(text)));
+        }
+        ClipboardContent::Html(html) => {
+            payloads.push((
+                register_format(CF_HTML_NAME)?,
+                build_html_clipboard_payload(html).into_bytes(),
+            ));
+            payloads.push((CF_UNICODETEXT, utf16_bytes(&html_to_plain_text(html))));
+        }
+        ClipboardContent::Rtf(rtf) => {
+            payloads.push((register_format(CF_RTF_NAME)?, rtf.as_bytes().to_vec()));
+            payloads.push((CF_UNICODETEXT, utf16_bytes(&rtf_to_plain_text(rtf))));
+        }
+        ClipboardContent::Image { data, format } => {
+            // 超过 8MB 的标记条目没有 blob（T-202），无法粘贴
+            if data.is_empty() {
+                return Err(AppError::ClipboardRead);
+            }
+            match format {
+                ImageFormat::Png => {
+                    payloads.push((register_format(CF_PNG_NAME)?, data.clone()));
+                    payloads.push((CF_DIB, crate::platform::imaging::png_to_dib(data)?));
+                }
+                ImageFormat::Dib => {
+                    payloads.push((CF_DIB, data.clone()));
+                }
+            }
+        }
+        ClipboardContent::Files(files) => {
+            payloads.push((CF_HDROP, build_dropfiles(files)));
+        }
+    }
+
+    Ok(payloads)
+}
+
+/// UTF-16 文本 + 双 NUL 结尾
+fn utf16_bytes(text: &str) -> Vec<u8> {
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    wide.push(0);
+    wide.push(0);
+    wide.iter().flat_map(|unit| unit.to_le_bytes()).collect()
+}
+
+/// 构造带 `HTML Format` 头的载荷（偏移按字节、10 位零填充）
+fn build_html_clipboard_payload(fragment: &str) -> String {
+    let body = format!(
+        "<html><body><!--StartFragment-->{}<!--EndFragment--></body></html>",
+        fragment
+    );
+    let body_start_marker = "<html><body><!--StartFragment-->".len();
+    let header_len = html_header(0, 0, 0, 0).len();
+    let start_html = header_len;
+    let end_html = header_len + body.len();
+    let start_fragment = header_len + body_start_marker;
+    let end_fragment = start_fragment + fragment.len();
+
+    format!(
+        "{}{}",
+        html_header(start_html, end_html, start_fragment, end_fragment),
+        body
+    )
+}
+
+/// HTML Format 头（固定 10 位宽度，长度不随数值变化）
+fn html_header(
+    start_html: usize,
+    end_html: usize,
+    start_fragment: usize,
+    end_fragment: usize,
+) -> String {
+    format!(
+        "Version:0.9\r\nStartHTML:{:010}\r\nEndHTML:{:010}\r\nStartFragment:{:010}\r\nEndFragment:{:010}\r\n",
+        start_html, end_html, start_fragment, end_fragment
+    )
+}
+
+/// 构造 CF_HDROP 字节：DROPFILES 头 + 双 NUL 结尾的 UTF-16 路径
+fn build_dropfiles(files: &[String]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(DROPFILES_HEADER_LEN as u32).to_le_bytes());
+    bytes.extend_from_slice(&0i32.to_le_bytes()); // pt.x
+    bytes.extend_from_slice(&0i32.to_le_bytes()); // pt.y
+    bytes.extend_from_slice(&0i32.to_le_bytes()); // fNC
+    bytes.extend_from_slice(&1i32.to_le_bytes()); // fWide = TRUE
+
+    for file in files {
+        for unit in file.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+    }
+    // 整个列表再补一个 NUL，形成双 NUL 结尾
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes
+}
+
+/// 分配可移动全局内存并写入系统剪贴板；成功后所有权归系统
+fn set_clipboard_bytes(format: u32, bytes: &[u8]) -> Result<(), AppError> {
+    // SAFETY: GMEM_MOVEABLE 是有效标志，长度为实际字节数
+    let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len()) }
+        .map_err(|e| AppError::Internal(format!("GlobalAlloc failed: {}", e)))?;
+
+    // SAFETY: handle 由 GlobalAlloc 返回且非空
+    let ptr = unsafe { GlobalLock(handle) };
+    if ptr.is_null() {
+        // SAFETY: handle 由本函数分配，尚未交给系统
+        let _ = unsafe { GlobalFree(handle) };
+        return Err(AppError::Internal("GlobalLock failed".into()));
+    }
+
+    // SAFETY: 缓冲区大小等于 bytes.len()
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len()) };
+    // SAFETY: 与 GlobalLock 成对
+    let _ = unsafe { GlobalUnlock(handle) };
+
+    // SAFETY: 剪贴板已打开，handle 有效
+    if let Err(e) = unsafe { SetClipboardData(format, HANDLE(handle.0)) } {
+        // 失败时内存仍归本函数，必须释放
+        // SAFETY: handle 未被系统接管
+        let _ = unsafe { GlobalFree(handle) };
+        return Err(AppError::Internal(format!(
+            "SetClipboardData failed: {}",
+            e
+        )));
+    }
+
+    // 成功后禁止 GlobalFree（所有权已转移给系统）
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -633,6 +820,93 @@ mod tests {
             }
             other => panic!("unexpected content: {:?}", other),
         }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn HTML载荷可被读回且偏移为字节() {
+        let payload = build_html_clipboard_payload("你好<b>世界</b>");
+        assert!(payload.starts_with("Version:0.9\r\nStartHTML:0000000"));
+
+        let fragment = match parse_html_fragment(payload.as_bytes()) {
+            Some(fragment) => fragment,
+            None => panic!("payload should be parseable"),
+        };
+        assert_eq!(fragment, "你好<b>世界</b>");
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn HTML载荷空片段也能解析() {
+        let payload = build_html_clipboard_payload("");
+        let parsed = parse_html_fragment(payload.as_bytes());
+        assert!(parsed.is_some());
+        assert!(parsed.unwrap_or_default().contains("<!--StartFragment-->"));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn DROPFILES结构与双NUL结尾() {
+        let bytes = build_dropfiles(&["C:\\a b\\中文.txt".to_string()]);
+        assert!(bytes.len() >= DROPFILES_HEADER_LEN + 4);
+        assert_eq!(
+            u32::from_le_bytes(bytes[0..4].try_into().unwrap_or_default()),
+            DROPFILES_HEADER_LEN as u32
+        );
+        assert_eq!(
+            i32::from_le_bytes(bytes[16..20].try_into().unwrap_or_default()),
+            1
+        );
+
+        let tail = &bytes[bytes.len() - 4..];
+        assert_eq!(tail, &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 文本写入带双NUL() {
+        let bytes = utf16_bytes("ab");
+        assert_eq!(bytes, vec![0x61, 0x00, 0x62, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    /// 口径测试：写入 payload → 按读回逻辑解析 → 内容 hash 与原始内容一致（不碰系统剪贴板）
+    #[test]
+    #[allow(non_snake_case)]
+    fn 写回解析后hash与原文一致() {
+        use crate::services::storage::content_hash;
+
+        let fragment = "你好<b>QuickWin</b>";
+        let payload = build_html_clipboard_payload(fragment);
+        let read_back = parse_html_fragment(payload.as_bytes()).unwrap_or_default();
+
+        assert_eq!(
+            content_hash(&ClipboardContent::Html(read_back)).ok(),
+            content_hash(&ClipboardContent::Html(fragment.to_string())).ok()
+        );
+
+        let rtf = "{\\rtf1\\ansi QuickWin}";
+        assert_eq!(
+            content_hash(&ClipboardContent::Rtf(
+                String::from_utf8_lossy(rtf.as_bytes()).to_string()
+            ))
+            .ok(),
+            content_hash(&ClipboardContent::Rtf(rtf.to_string())).ok()
+        );
+    }
+
+    /// 手测：写入真实剪贴板 → 读回 → hash 一致（会覆盖系统剪贴板，默认不跑）
+    #[test]
+    #[ignore = "会修改系统剪贴板，需手动执行"]
+    fn 写入读回hash一致() {
+        let content = ClipboardContent::Text("QuickWin roundtrip 你好".to_string());
+        write_clipboard_content(&content).expect("write clipboard");
+        let entry = read_clipboard_content()
+            .expect("read clipboard")
+            .expect("supported format");
+        assert_eq!(
+            crate::services::storage::content_hash(&entry.content).ok(),
+            crate::services::storage::content_hash(&content).ok()
+        );
     }
 
     #[test]

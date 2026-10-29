@@ -55,9 +55,12 @@ pub fn run() {
             commands::clipboard::clipboard_get,
             commands::clipboard::clipboard_set_pinned,
             commands::clipboard::clipboard_delete,
+            commands::clipboard::clipboard_activate,
+            commands::clipboard::clipboard_set_restore_after_paste,
         ])
         .manage(OverlayManager::new())
         .manage(HotkeyManager::new())
+        .manage(services::paste::PasteOptions::new())
         .setup(|app| {
             log::info!("QuickWin starting");
             services::tray::setup_tray(app.handle())?;
@@ -77,8 +80,12 @@ pub fn run() {
                 }
             }
 
+            // 粘贴抑制状态：监听线程与 clipboard_activate 共享
+            let suppression = services::clipboard::PasteSuppression::new();
+            app.manage(suppression.handle());
+
             // 启动剪贴板监听；monitor 必须交给 AppState 持有，否则线程会被立即回收
-            match services::clipboard::ClipboardMonitor::start(app.handle().clone()) {
+            match services::clipboard::ClipboardMonitor::start(app.handle().clone(), suppression) {
                 Ok(monitor) => {
                     app.manage(monitor);
                 }

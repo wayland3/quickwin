@@ -1,5 +1,6 @@
 pub mod clipboard;
 pub mod focus;
+pub mod imaging;
 pub mod input;
 
 // Win32 平台层：剪贴板、热键、焦点、应用列表、文件索引
