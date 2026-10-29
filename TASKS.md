@@ -150,7 +150,11 @@
 - 前端监听 `hotkey://pressed` 事件，触发对应浮层显示
 - 注册失败时发送 `hotkey://failed` 事件，保留旧热键可用
 - 改绑逻辑：先注册新键，成功后注销旧键
-- 交叉评审：待执行
+- 补评审修复（2026-10-29）：前端挂载后主动 `hotkey_status` 拉取失败列表并 toast；浮层
+  `overlay://show`/`overlay://shown` 可见时再次检查；rebind 新旧键相同短路、冲突时回滚 failed
+  记录保旧键；旧键注销失败回滚 bindings 并补发事件；`register_defaults` 改无返回值
+- 交叉评审：doubao-seed-2.1-pro（2026-10-29 补评审）PASS，3 轮，详见 docs/reviews/T-103.md；
+  真机手测清单见该记录
 
 ### [x] T-104 [complex] 前台窗口捕获与焦点恢复 — 2026-10-27
 - 记录触发前的 `HWND`、进程名、窗口标题、显示器
@@ -169,7 +173,8 @@
 - capture_foreground 在 Hidden→Showing 时调用，失败降级为 None
 - 提权检测使用 TokenElevation（OpenProcessToken + GetTokenInformation）
 - 焦点恢复使用 RAII 守卫（ThreadInputGuard）保证 AttachThreadInput 成对调用
-- 交叉评审：待执行
+- 交叉评审：doubao-seed-2.1-pro（补登记，2026-10-29 核对 docs/reviews/T-104.md：GLM-5.3 PASS），
+  真机手测清单见该记录
 
 ### [x] T-105 [complex] 输入模拟层（SendInput） — 2026-10-27
 - `send_text`（Unicode，含 emoji/代理对）、`send_combo("ctrl+v")`、`send_copy()`、`send_paste()`

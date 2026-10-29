@@ -65,9 +65,9 @@ pub fn run() {
             log::info!("QuickWin starting");
             services::tray::setup_tray(app.handle())?;
 
-            // 注册默认热键
+            // 注册默认热键；单个失败不中断启动（失败记录供前端主动拉取）
             let hotkey_manager = app.state::<HotkeyManager>();
-            hotkey_manager.register_defaults(app.handle())?;
+            hotkey_manager.register_defaults(app.handle());
 
             // 数据库路径作为只读配置交给受管状态；command 侧按需开短连接
             match services::storage::DbPath::resolve() {
@@ -98,5 +98,6 @@ pub fn run() {
             Ok(())
         })
         .run(tauri::generate_context!())
+        // 启动期不可恢复错误（事件循环建立失败），按 AGENTS.md §2 #3 允许 panic
         .expect("error while running tauri application");
 }

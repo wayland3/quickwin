@@ -20,14 +20,16 @@ function App() {
       .then((result) => setPingResult(result))
       .catch((err) => setError(String(err)));
 
-    // 监听 overlay://show 事件（来自托盘菜单）
+    // 监听 overlay://show 事件（来自托盘菜单）：同时重查失败热键，保证托盘直达也有提示
     const unlistenShow = listen<string>('overlay://show', (event) => {
       setMode(event.payload);
+      showFailedHotkeys();
     });
 
-    // 监听 overlay://shown 事件（浮层显示后）
+    // 监听 overlay://shown 事件（浮层显示后）：窗口此刻对用户可见，重新检查失败热键
     const unlistenShown = listen<string>('overlay://shown', (event) => {
       setMode(event.payload);
+      showFailedHotkeys();
     });
 
     // 监听 overlay://hidden 事件（浮层隐藏后）
@@ -46,6 +48,36 @@ function App() {
         ipc.overlayShow('actions').catch(console.error);
       }
     });
+
+    // setup 阶段的注册失败事件早于本监听器建立，无法接收；改为挂载后主动拉取状态
+    const showFailedHotkeys = () => {
+      ipc
+        .hotkeyStatus()
+        .then((status) => {
+          if (status.failed.length > 0) {
+            const keys = status.failed.map((item) => item.accelerator).join('、');
+            setToast({
+              message: `热键 ${keys} 已被其他程序占用，可在设置中改绑`,
+              level: 'info',
+            });
+          }
+        })
+        .catch(() => undefined);
+    };
+    showFailedHotkeys();
+
+    // 运行时注册失败（如改绑）通过事件即时提示
+    const unlistenHotkeyFailed = listen<{ accelerator?: string }>(
+      'hotkey://failed',
+      (event) => {
+        const accelerator = event.payload?.accelerator;
+        if (!accelerator) return;
+        setToast({
+          message: `热键 ${accelerator} 已被其他程序占用，可在设置中改绑`,
+          level: 'info',
+        });
+      },
+    );
 
     // Esc 键隐藏浮层
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -81,6 +113,7 @@ function App() {
       unlistenHotkey.then(f => f());
       unlistenInsertError.then(f => f());
       unlistenToast.then(f => f());
+      unlistenHotkeyFailed.then(f => f());
       window.removeEventListener('keydown', handleKeyDown);
     };
   }, []);
