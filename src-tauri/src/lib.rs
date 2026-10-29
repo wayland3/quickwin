@@ -63,6 +63,7 @@ pub fn run() {
             commands::settings::settings_update,
             commands::settings::settings_reset,
             commands::settings::settings_set_paused,
+            commands::launcher::app_index_rebuild,
         ])
         .manage(OverlayManager::new())
         .manage(HotkeyManager::new())

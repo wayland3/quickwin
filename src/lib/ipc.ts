@@ -5,6 +5,7 @@ import type {
   ClipboardListResult,
   Settings,
 } from './clipboard';
+import type { AppIndexRebuildResult } from './launcher';
 
 /** 后端错误结构 */
 interface AppError {
@@ -89,6 +90,10 @@ export const ipc = {
 
   async hotkeyRebind(action: string, accelerator: string): Promise<boolean> {
     return invokeWrapper<boolean>('hotkey_rebind', { action, accelerator });
+  },
+
+  async appIndexRebuild(): Promise<AppIndexRebuildResult> {
+    return invokeWrapper<AppIndexRebuildResult>('app_index_rebuild');
   },
 
   async clipboardList(params: {

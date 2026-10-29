@@ -1,3 +1,4 @@
+pub mod apps;
 pub mod clipboard;
 pub mod focus;
 pub mod imaging;

@@ -5,11 +5,13 @@ import type {
   ClipboardListResult,
   Settings,
 } from './clipboard';
+import type { AppIndexRebuildResult } from './launcher';
 
 import ClipboardItemKeys from './contract/ClipboardItem.keys.json';
 import ClipboardDetailKeys from './contract/ClipboardDetail.keys.json';
 import ClipboardListResultKeys from './contract/ClipboardListResult.keys.json';
 import SettingsKeys from './contract/Settings.keys.json';
+import AppIndexRebuildResultKeys from './contract/AppIndexRebuildResult.keys.json';
 
 /**
  * IPC 契约测试
@@ -101,6 +103,15 @@ describe('IPC 契约', () => {
 
       const keys = Object.keys(settings).sort();
       expect(keys).toEqual(SettingsKeys.sort());
+    });
+  });
+
+  describe('AppIndexRebuildResult 字段集合', () => {
+    it('与 Rust 序列化一致', () => {
+      const result: AppIndexRebuildResult = { count: 0 };
+
+      const keys = Object.keys(result).sort();
+      expect(keys).toEqual(AppIndexRebuildResultKeys.sort());
     });
   });
 });

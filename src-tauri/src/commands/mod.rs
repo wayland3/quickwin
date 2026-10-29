@@ -1,4 +1,5 @@
 pub mod clipboard;
+pub mod launcher;
 pub mod settings;
 
 use crate::error::AppError;

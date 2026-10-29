@@ -26,7 +26,8 @@
 
 ## 当前焦点
 
-**M2 已完成**（2026-10-29）。**M3 启动器**推进中：下一个是 T-301 应用索引。
+**M2 已完成**（2026-10-29）。**M3 启动器**推进中：T-301 应用索引已完成（2026-10-29），
+下一个是 T-302 索引刷新。
 
 **注意**：T-101 至 T-105 均已完成，M1 出口条件满足（热键呼出/隐藏、焦点恢复、SendInput 全部手工验证待用户执行）。
 
@@ -441,13 +442,49 @@
 
 ## M3 启动器
 
-### [ ] [L1] T-301 应用索引
+### [x] [L2] T-301 应用索引 — 2026-10-29
 - 来源：开始菜单 `.lnk`（用户 + 全局）、`App Paths` 注册表、UWP（`shell:AppsFolder`）
 - 解析 lnk 目标与图标；UWP 用真实显示名 + `AppUserModelID`
 - 索引写入 SQLite（`app_index`），带来源与去重键（可执行路径 / AUMID）
 
 验收：本机开始菜单应用命中率 ≥90%（人工抽查 30 个）；同一应用不重复出现；重建索引 ≤2s（1000 项）。
 依赖：T-106。
+
+**实现备注（2026-10-29）**：
+- 评审级别：TASKS 原标 L1，因涉及 `platform/` Win32/COM 边界 + schema migration，按
+  `AGENTS.md` §2 #11 上调为 L2（设计评审 + 实现评审各 1 轮，均 PASS）
+- 新增 `platform/apps.rs`：COM 守卫（STA，`S_OK`/`S_FALSE` 配对、`RPC_E_CHANGED_MODE` 不反初始化）、
+  `.lnk` 解析（`IShellLinkW` + `IPersistFile`，`SLGP_RAWPATH`）、App Paths（HKLM 64/32 位 + HKCU）、
+  UWP（`SHGetKnownFolderIDList` + 桌面 `IShellFolder::BindToObject` + `IEnumIDList` + `SHCreateItemWithParent`
+  + `PKEY_AppUserModel_ID`/`SIGDN_NORMALDISPLAY`）
+- `Cargo.toml` 复用既有 `windows` crate，追加 feature `Win32_UI_Shell_PropertiesSystem`、
+  `Win32_Storage_FileSystem`、`Win32_System_Registry`（未新增依赖）
+- 新增 `services/appindex.rs`：开始菜单目录递归（深度 ≤4）、候选合并纯函数、来源优先级
+  `start_menu > app_paths > uwp` + 名称字典序 + 图标优先的稳定去重；过滤卸载/说明类快捷方式、
+  目标不存在或非可执行扩展；UWP 仅保留含 `!` 的包内 AUMID（Win32 风格 AUMID 已由前两来源覆盖，
+  避免同一应用重复出现）
+- `storage.rs`：`SCHEMA_VERSION` 2→3，v3 建 `app_index`（`key UNIQUE` + `ix_app_name`）；
+  `replace_app_index` 单事务 DELETE + INSERT，防御性按小写 key 去重；v2→v3 迁移测试保留剪贴板与设置
+- 新增 `commands/launcher.rs::app_index_rebuild`：`spawn_blocking` 内扫描 + 落库，返回 `{ count }`；
+  `models.rs` 新增 `AppIndexRebuildResult`，前端 `ipc.ts` + `ipc.contract.test.ts` + 共享 fixture
+- 错误处理：COM 初始化失败 → `Internal`；单条快捷方式失败跳过计数；App Paths / UWP 失败降级为空 +
+  warn；SQLite 失败事务回滚；扫描为空返回 `count=0`
+- 日志只记来源计数/失败数/耗时，不含路径与应用名
+- 测试：116 Rust passed / 2 ignored，前端 49 passed；`npm.cmd run verify` 全绿
+- 交叉评审：GLM-5.3 PASS（设计 1 轮 + 实现 1 轮），详见 `docs/reviews/T-301.md` 与
+  `docs/reviews/T-301-design.md`
+- 真机实测（本机）：`.lnk` 134 / 失败 4、App Paths 75、AppsFolder 170（过滤后入索引）、
+  最终 109 条；首次冷启动 1.4s、预热 0.35s；同小写名重复 0（`#[ignore]` 测试可复跑）
+- 偏差 1：图标只存 `.lnk` 图标位置字符串（`path` 或 `path,index`），未做 HICON→PNG 提取，
+  启动器 UI 先用占位/系统图标（随 T-303/T-304）
+- 偏差 2：UWP 枚举失败的 `Get-StartApps` 快照降级未实现（当前降级为空 + warn），随 T-302 刷新评估
+- 偏差 3：启动异步刷新与 10 分钟轮询属 T-302，本任务只交付命令触发的完整重建；托盘/内置命令入口随 T-306
+- 遗留（NONBLOCK）：
+  1. 原始路径未展开环境变量（`%SystemRoot%` 等）时可能漏项，改为 `SLGP_RAWPATH` 的已知取舍
+  2. 图标回退到 target，`cmd.exe /c` 类启动器可能指向非实际程序
+  3. 逐候选 `Path::is_file()` 磁盘 IO，候选量更大时接近 2s 门限需再评估缓存
+- 待真机手测（需在用户目标机执行）：人工抽查 30 个开始菜单应用核对命中率；触发一次重建并核对
+  面板/搜索可用（入口随 T-303/T-304）；UWP 启动待 T-304 接入 `IApplicationActivationManager`
 
 ### [ ] [L1] T-302 索引刷新
 - 启动时异步刷新；开始菜单目录变化（`ReadDirectoryChangesW` 或 10 分钟轮询）触发增量更新

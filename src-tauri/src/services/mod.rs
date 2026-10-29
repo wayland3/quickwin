@@ -1,3 +1,4 @@
+pub mod appindex;
 pub mod clipboard;
 pub mod hotkey;
 pub mod logging;

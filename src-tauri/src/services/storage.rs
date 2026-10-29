@@ -15,6 +15,7 @@ use crate::services::query::{self, SearchKind};
 use rusqlite::types::FromSql;
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -36,7 +37,7 @@ const DETAIL_COLUMNS: &str = "id, kind, preview, text_body, html, rtf, file_list
 const PREVIEW_MAX_CHARS: usize = 512;
 
 /// 当前 schema 版本
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// v1 schema
 const SCHEMA_V1: &str = r#"
@@ -82,6 +83,23 @@ CREATE TABLE settings (
     value TEXT NOT NULL
 );
 "#;
+
+/// v3 schema：应用索引（来源 start_menu / app_paths / uwp / builtin）
+const SCHEMA_V3: &str = r#"
+CREATE TABLE app_index (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    key        TEXT NOT NULL UNIQUE,
+    name       TEXT NOT NULL,
+    target     TEXT NOT NULL,
+    args       TEXT,
+    kind       TEXT NOT NULL CHECK (kind IN ('win32','uwp','url','command')),
+    source     TEXT NOT NULL,
+    icon_path  TEXT,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX ix_app_name ON app_index(name);
+"#;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InsertOutcome {
     /// 新条目，附带 id
@@ -120,6 +138,25 @@ pub struct CleanupReport {
 pub struct ClearReport {
     pub deleted_items: usize,
     pub deleted_blobs: usize,
+}
+
+/// 应用索引行（写入 `app_index` 表）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppIndexRow {
+    /// 去重键：小写可执行文件路径或小写 AUMID
+    pub key: String,
+    /// 显示名
+    pub name: String,
+    /// 目标（可执行文件路径或 AUMID）
+    pub target: String,
+    /// 启动参数
+    pub args: Option<String>,
+    /// win32 / uwp / url / command
+    pub kind: String,
+    /// start_menu / app_paths / uwp / builtin
+    pub source: String,
+    /// 图标位置（`path` 或 `path,index`）
+    pub icon_path: Option<String>,
 }
 
 /// 数据库路径（只读配置，供 command 层按需开短连接）
@@ -245,6 +282,10 @@ impl ClipboardStorage {
                 1 => {
                     self.apply_version(2, SCHEMA_V2)?;
                     log::info!("database migrated: version=2");
+                }
+                2 => {
+                    self.apply_version(3, SCHEMA_V3)?;
+                    log::info!("database migrated: version=3");
                 }
                 other => {
                     return Err(AppError::Storage(format!(
@@ -920,6 +961,63 @@ impl ClipboardStorage {
                 log::warn!("failed to remove blob file: {}", e);
             }
         }
+    }
+
+    /// 全量替换应用索引（单事务 DELETE + INSERT；失败自动回滚，保留旧索引）
+    ///
+    /// 重复 key 防御性跳过（扫描层已去重）；返回实际写入条数。
+    pub fn replace_app_index(
+        &mut self,
+        rows: &[AppIndexRow],
+        updated_at: i64,
+    ) -> Result<usize, AppError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| {
+                AppError::Storage(format!("failed to begin app index transaction: {}", e))
+            })?;
+
+        tx.execute("DELETE FROM app_index", [])
+            .map_err(|e| AppError::Storage(format!("failed to clear app index: {}", e)))?;
+
+        let mut inserted = 0usize;
+        let mut seen: HashSet<String> = HashSet::new();
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO app_index
+                        (key, name, target, args, kind, source, icon_path, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                )
+                .map_err(|e| {
+                    AppError::Storage(format!("failed to prepare app index insert: {}", e))
+                })?;
+
+            for row in rows {
+                let key = row.key.trim().to_lowercase();
+                if key.is_empty() || !seen.insert(key.clone()) {
+                    continue;
+                }
+                stmt.execute(params![
+                    key,
+                    row.name,
+                    row.target,
+                    row.args,
+                    row.kind,
+                    row.source,
+                    row.icon_path,
+                    updated_at
+                ])
+                .map_err(|e| AppError::Storage(format!("failed to insert app index row: {}", e)))?;
+                inserted += 1;
+            }
+        }
+
+        tx.commit()
+            .map_err(|e| AppError::Storage(format!("failed to commit app index: {}", e)))?;
+
+        Ok(inserted)
     }
 
     /// 打开可写连接（业务写命令用）：跳过启动期 FTS 一致性全表计数
@@ -2033,7 +2131,7 @@ mod tests {
 
     #[test]
     #[allow(non_snake_case)]
-    fn v1库迁移到v2后剪贴板数据保留() {
+    fn v1库迁移到最新版本后剪贴板数据保留() {
         let unique = format!(
             "quickwin-migrate-v2-{}-{}",
             std::process::id(),
@@ -2072,13 +2170,13 @@ mod tests {
         };
         assert_eq!(version_before, 1);
 
-        // 打开时自动迁移到 v2
-        let storage = ClipboardStorage::open_at(&db_path).expect("migrate to v2");
+        // 打开时自动迁移到最新版本
+        let storage = ClipboardStorage::open_at(&db_path).expect("migrate to latest");
         let version_after: i64 = storage
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("read migrated version");
-        assert_eq!(version_after, 2);
+        assert_eq!(version_after, SCHEMA_VERSION);
 
         let table_exists: i64 = storage
             .conn
@@ -2089,6 +2187,16 @@ mod tests {
             )
             .expect("check settings table");
         assert_eq!(table_exists, 1);
+
+        let app_index_exists: i64 = storage
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='app_index'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("check app_index table");
+        assert_eq!(app_index_exists, 1);
 
         let (_items, total) = storage
             .list("", ClipFilter::All, 50, 0)
@@ -2104,6 +2212,178 @@ mod tests {
         if let Some(dir) = db_path.parent() {
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    fn app_row(key: &str, name: &str) -> AppIndexRow {
+        AppIndexRow {
+            key: key.to_string(),
+            name: name.to_string(),
+            target: key.to_string(),
+            args: None,
+            kind: "win32".to_string(),
+            source: "start_menu".to_string(),
+            icon_path: None,
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn v2库迁移到v3后设置与剪贴板数据保留() {
+        let unique = format!(
+            "quickwin-migrate-v3-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let db_path = std::env::temp_dir().join(unique).join("quickwin.db");
+
+        let dir_path = db_path.parent().expect("db parent");
+        std::fs::create_dir_all(dir_path).expect("create db dir");
+        let v2_conn = rusqlite::Connection::open(&db_path).expect("open v2 connection");
+        v2_conn.execute_batch(SCHEMA_V1).expect("apply v1 schema");
+        v2_conn.execute_batch(SCHEMA_V2).expect("apply v2 schema");
+        v2_conn
+            .pragma_update(None, "user_version", 2)
+            .expect("set v2 version");
+
+        v2_conn
+            .execute(
+                "INSERT INTO clipboard_item (
+                    kind, hash, preview, byte_size, created_at, last_copied_at
+                 ) VALUES ('text', 'v2-migrate-hash', '迁移保留文本', 6, 1000, 1000)",
+                [],
+            )
+            .expect("insert v2 clipboard row");
+        let settings_json =
+            serde_json::to_string(&crate::models::Settings::default()).expect("serialize settings");
+        v2_conn
+            .execute(
+                "INSERT INTO settings (id, value) VALUES (1, ?1)",
+                params![settings_json],
+            )
+            .expect("insert v2 settings");
+        drop(v2_conn);
+
+        let storage = ClipboardStorage::open_at(&db_path).expect("migrate to v3");
+        let version_after: i64 = storage
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("read migrated version");
+        assert_eq!(version_after, SCHEMA_VERSION);
+
+        let (_items, total) = storage
+            .list("", ClipFilter::All, 50, 0)
+            .expect("list after migration");
+        assert_eq!(total, 1);
+
+        let loaded = storage.load_settings();
+        assert_eq!(loaded, crate::models::Settings::default());
+
+        let app_index_exists: i64 = storage
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='app_index'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("check app_index table");
+        assert_eq!(app_index_exists, 1);
+
+        if let Some(dir) = db_path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 应用索引全量替换且重复键被跳过() {
+        let mut storage = open_test_storage();
+
+        let first = vec![app_row("a.exe", "Alpha"), app_row("b.exe", "Beta")];
+        assert_eq!(
+            storage
+                .replace_app_index(&first, 1000)
+                .expect("replace app index"),
+            2
+        );
+
+        // 第二次替换清掉旧数据；大小写不同的同一 key 只保留首次出现
+        let second = vec![
+            app_row("B.EXE", "Beta 新"),
+            app_row("b.exe", "Beta 重复"),
+            app_row("c.exe", "Gamma"),
+        ];
+        assert_eq!(
+            storage
+                .replace_app_index(&second, 2000)
+                .expect("replace app index again"),
+            2
+        );
+
+        let mut stmt = storage
+            .conn
+            .prepare("SELECT key, name, updated_at FROM app_index ORDER BY key")
+            .expect("prepare app index query");
+        let rows: Vec<(String, String, i64)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("query app index")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect app index");
+
+        assert_eq!(
+            rows,
+            vec![
+                ("b.exe".to_string(), "Beta 新".to_string(), 2000),
+                ("c.exe".to_string(), "Gamma".to_string(), 2000),
+            ]
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 空列表清空应用索引() {
+        let mut storage = open_test_storage();
+        let rows = vec![app_row("a.exe", "Alpha")];
+        storage
+            .replace_app_index(&rows, 1000)
+            .expect("seed app index");
+
+        assert_eq!(
+            storage
+                .replace_app_index(&[], 2000)
+                .expect("clear app index"),
+            0
+        );
+
+        let count: i64 = storage
+            .conn
+            .query_row("SELECT COUNT(*) FROM app_index", [], |row| row.get(0))
+            .expect("count app index");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 一千条应用索引替换在两秒内() {
+        let mut storage = open_test_storage();
+        let rows: Vec<AppIndexRow> = (0..1000)
+            .map(|index| app_row(&format!("app-{index}.exe"), &format!("应用 {index}")))
+            .collect();
+
+        let started = std::time::Instant::now();
+        let inserted = storage
+            .replace_app_index(&rows, 1000)
+            .expect("replace 1000 rows");
+        let elapsed = started.elapsed();
+
+        assert_eq!(inserted, 1000);
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "1000 条替换耗时 {:?}，超过 2s 预算",
+            elapsed
+        );
     }
 
     #[test]

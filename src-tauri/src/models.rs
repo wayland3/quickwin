@@ -52,6 +52,13 @@ pub struct LauncherItem {
     pub score: f32,
 }
 
+/// 应用索引重建结果（`app_index_rebuild` 返回）
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppIndexRebuildResult {
+    /// 写入的应用条数
+    pub count: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionOffer {
     pub id: String,
@@ -549,6 +556,24 @@ mod settings_tests {
         let settings = Settings::default();
 
         let value = serde_json::to_value(&settings).expect("serialize");
+        let mut actual: Vec<String> = value.as_object().expect("object").keys().cloned().collect();
+        actual.sort();
+
+        let mut expected_sorted = expected;
+        expected_sorted.sort();
+
+        assert_eq!(actual, expected_sorted);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn AppIndexRebuildResult字段集合与前端fixture一致() {
+        let fixture = include_str!("../../src/lib/contract/AppIndexRebuildResult.keys.json");
+        let expected: Vec<String> = serde_json::from_str(fixture).expect("parse fixture");
+
+        let result = AppIndexRebuildResult { count: 0 };
+
+        let value = serde_json::to_value(result).expect("serialize");
         let mut actual: Vec<String> = value.as_object().expect("object").keys().cloned().collect();
         actual.sort();
 
