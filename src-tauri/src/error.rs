@@ -27,8 +27,8 @@ pub enum AppError {
     #[error("数据库操作失败")]
     Storage(String),
 
-    #[error("设置值不合法，已恢复默认")]
-    SettingsInvalid,
+    #[error("设置值不合法")]
+    SettingsInvalid(String),
 
     #[error("发生内部错误，请查看日志")]
     Internal(String),
@@ -62,7 +62,9 @@ impl Serialize for AppError {
             }
             AppError::HotkeyRegisterFailed => ("hotkey.register_failed", self.to_string()),
             AppError::Storage(_) => ("storage.error", self.to_string()),
-            AppError::SettingsInvalid => ("settings.invalid", self.to_string()),
+            AppError::SettingsInvalid(reason) => {
+                ("settings.invalid", format!("设置不合法：{}", reason))
+            }
             AppError::Internal(_) => ("internal", self.to_string()),
         };
 

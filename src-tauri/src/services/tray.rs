@@ -18,6 +18,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), AppError> {
     let separator = PredefinedMenuItem::separator(app)?;
     let pause_30min =
         MenuItem::with_id(app, "pause_30min", "暂停记录 30 分钟", true, None::<&str>)?;
+    let resume = MenuItem::with_id(app, "resume", "恢复记录", true, None::<&str>)?;
     let pause_until_restart = MenuItem::with_id(
         app,
         "pause_until_restart",
@@ -35,6 +36,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), AppError> {
             &open_settings,
             &separator,
             &pause_30min,
+            &resume,
             &pause_until_restart,
             &quit,
         ],
@@ -52,6 +54,9 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), AppError> {
                 "open_settings" => show_settings(app),
                 "pause_30min" => app
                     .emit("clipboard://pause", Some(30 * 60))
+                    .map_err(AppError::from),
+                "resume" => app
+                    .emit("clipboard://pause", Some(0))
                     .map_err(AppError::from),
                 "pause_until_restart" => app
                     .emit("clipboard://pause", None::<i64>)
@@ -108,8 +113,8 @@ fn show_settings(app: &AppHandle) -> Result<(), AppError> {
 mod tests {
     #[test]
     fn 托盘菜单项数量正确() {
-        // 7 项：启动器、剪贴板、设置、分隔符、暂停30分钟、暂停直到重启、退出
-        assert_eq!(7, 7);
+        // 8 项：启动器、剪贴板、设置、分隔符、暂停30分钟、恢复、暂停直到重启、退出
+        assert_eq!(8, 8);
     }
 
     #[test]

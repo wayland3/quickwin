@@ -7,9 +7,10 @@ mod models;
 mod platform;
 mod services;
 
-use services::hotkey::HotkeyManager;
+use services::hotkey::{HotkeyAction, HotkeyManager};
 use services::window::OverlayManager;
 use tauri::{Emitter, Manager};
+use tauri_plugin_autostart::ManagerExt;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -57,6 +58,10 @@ pub fn run() {
             commands::clipboard::clipboard_delete,
             commands::clipboard::clipboard_activate,
             commands::clipboard::clipboard_set_restore_after_paste,
+            commands::settings::settings_get,
+            commands::settings::settings_update,
+            commands::settings::settings_reset,
+            commands::settings::settings_set_paused,
         ])
         .manage(OverlayManager::new())
         .manage(HotkeyManager::new())
@@ -65,32 +70,71 @@ pub fn run() {
             log::info!("QuickWin starting");
             services::tray::setup_tray(app.handle())?;
 
-            // 注册默认热键；单个失败不中断启动（失败记录供前端主动拉取）
-            let hotkey_manager = app.state::<HotkeyManager>();
-            hotkey_manager.register_defaults(app.handle());
-
-            // 数据库路径作为只读配置交给受管状态；command 侧按需开短连接
-            match services::storage::DbPath::resolve() {
+            // 数据库路径必须最先就绪：启动注册热键/自启对账都要读 settings
+            let db_path = match services::storage::DbPath::resolve() {
                 Ok(db_path) => {
+                    let path = db_path.as_path().to_path_buf();
                     app.manage(db_path);
+                    path
                 }
                 Err(e) => {
-                    // 路径解析失败不阻塞启动，剪贴板 command 会返回可操作的中文错误
                     log::error!("failed to resolve database path: {}", e);
+                    return Ok(());
                 }
+            };
+
+            // 读取存储设置（非法/损坏时内部回退默认；DB 打不开也不阻断启动）
+            let settings = match services::storage::ClipboardStorage::open_readonly_at(&db_path) {
+                Ok(storage) => storage.load_settings(),
+                Err(e) => {
+                    log::warn!("failed to load settings at startup, using defaults: {}", e);
+                    crate::models::Settings::default()
+                }
+            };
+
+            // 启动热键：按存储设置注册，单个失败回退默认键；不中断启动
+            let hotkey_manager = app.state::<HotkeyManager>();
+            let startup_failed =
+                register_startup_hotkeys(app.handle(), &hotkey_manager, &settings)?;
+            for accelerator in &startup_failed {
+                let _ = app.emit(
+                    "hotkey://failed",
+                    serde_json::json!({ "accelerator": accelerator }),
+                );
+            }
+
+            // 开机自启对账：以 settings 为准应用一次（外部禁用后重启会自动校正）
+            let autolaunch = app.autolaunch();
+            let reconcile = if settings.autostart {
+                autolaunch.enable()
+            } else {
+                autolaunch.disable()
+            };
+            if let Err(e) = reconcile {
+                log::warn!("autostart reconcile failed: {}", e);
+            }
+
+            // 粘贴还原开关：启动时同步到进程内选项
+            if let Some(options) = app.try_state::<services::paste::PasteOptions>() {
+                options.set_restore_after_paste(settings.restore_clipboard_after_paste);
             }
 
             // 粘贴抑制状态：监听线程与 clipboard_activate 共享
             let suppression = services::clipboard::PasteSuppression::new();
+            let flags = services::clipboard::RuntimeFlags::new();
             app.manage(suppression.handle());
+            app.manage(flags.clone());
 
             // 启动剪贴板监听；monitor 必须交给 AppState 持有，否则线程会被立即回收
-            match services::clipboard::ClipboardMonitor::start(app.handle().clone(), suppression) {
+            match services::clipboard::ClipboardMonitor::start(
+                app.handle().clone(),
+                suppression,
+                flags,
+            ) {
                 Ok(monitor) => {
                     app.manage(monitor);
                 }
                 Err(e) => {
-                    // 存储初始化失败时不阻塞应用启动，记录错误供诊断
                     log::error!("clipboard monitor failed to start: {}", e);
                 }
             }
@@ -100,4 +144,48 @@ pub fn run() {
         .run(tauri::generate_context!())
         // 启动期不可恢复错误（事件循环建立失败），按 AGENTS.md §2 #3 允许 panic
         .expect("error while running tauri application");
+}
+
+/// 启动时按存储设置注册热键
+///
+/// 每个动作先注册设置中的键；失败（被占用/无效）则回退该动作的默认键。
+/// 返回最终仍注册失败的键列表（正常为空）。
+fn register_startup_hotkeys(
+    app: &tauri::AppHandle,
+    manager: &HotkeyManager,
+    settings: &crate::models::Settings,
+) -> Result<Vec<String>, crate::error::AppError> {
+    let bindings = [
+        (
+            HotkeyAction::Launcher,
+            settings.launcher_hotkey.as_str(),
+            "Alt+Space",
+        ),
+        (
+            HotkeyAction::Clipboard,
+            settings.clipboard_hotkey.as_str(),
+            "Alt+V",
+        ),
+        (
+            HotkeyAction::Actions,
+            settings.actions_hotkey.as_str(),
+            "Alt+X",
+        ),
+    ];
+
+    let mut failed = Vec::new();
+    for (action, configured, default) in bindings {
+        match manager.rebind(app, action, configured) {
+            Ok(true) => {}
+            _ => {
+                // 配置键注册失败：尝试默认键，并记录配置键（供前端提示改绑）
+                if !manager.rebind(app, action, default)? {
+                    failed.push(default.to_string());
+                }
+                failed.push(configured.to_string());
+            }
+        }
+    }
+
+    Ok(failed)
 }

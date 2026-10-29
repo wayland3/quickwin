@@ -74,29 +74,180 @@ pub struct SelectionContext {
     pub source_app: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 设置（存 settings 表，单条 JSON；v2 migration）
+///
+/// 所有字段带 serde 默认值，旧版本 JSON 缺字段时自动补默认。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct Settings {
+    /// 启动器热键
+    #[serde(default = "default_launcher_hotkey")]
     pub launcher_hotkey: String,
+    /// 剪贴板热键
+    #[serde(default = "default_clipboard_hotkey")]
     pub clipboard_hotkey: String,
+    /// 划词热键
+    #[serde(default = "default_actions_hotkey")]
     pub actions_hotkey: String,
+    /// 保留天数：7 / 15 / 30 / 90，-1 表示永不
+    #[serde(default = "default_retention_days")]
     pub retention_days: i32,
+    /// 条数上限：1000–50000
+    #[serde(default = "default_max_items")]
     pub max_items: i32,
-    pub autostart: bool,
+    /// 是否记录文本（含富文本）
+    #[serde(default = "default_true")]
+    pub record_text: bool,
+    /// 是否记录图片
+    #[serde(default = "default_true")]
+    pub record_image: bool,
+    /// 是否记录文件列表
+    #[serde(default = "default_true")]
+    pub record_files: bool,
+    /// 排除应用（进程名列表，通配匹配在 T-207 实现）
+    #[serde(default = "default_excluded_apps")]
+    pub excluded_apps: Vec<String>,
+    /// 主题：system / light / dark
+    #[serde(default = "default_theme")]
     pub theme: String,
+    /// 开机自启
+    #[serde(default)]
+    pub autostart: bool,
+    /// 暂停记录（持久化；托盘「暂停直到重启」不写该项）
+    #[serde(default)]
+    pub pause_recording: bool,
+    /// 粘贴后还原原剪贴板（T-205 开关，默认关）
+    #[serde(default)]
+    pub restore_clipboard_after_paste: bool,
+}
+
+/// 启动器热键默认值
+fn default_launcher_hotkey() -> String {
+    "Alt+Space".to_string()
+}
+/// 剪贴板热键默认值
+fn default_clipboard_hotkey() -> String {
+    "Alt+V".to_string()
+}
+/// 划词热键默认值
+fn default_actions_hotkey() -> String {
+    "Alt+X".to_string()
+}
+/// 保留天数默认 15 天
+fn default_retention_days() -> i32 {
+    15
+}
+/// 条数上限默认 10000
+fn default_max_items() -> i32 {
+    10_000
+}
+/// 开关默认开
+fn default_true() -> bool {
+    true
+}
+/// 默认主题
+fn default_theme() -> String {
+    "system".to_string()
+}
+/// 默认空排除列表
+fn default_excluded_apps() -> Vec<String> {
+    Vec::new()
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            launcher_hotkey: "Alt+Space".to_string(),
-            clipboard_hotkey: "Alt+V".to_string(),
-            actions_hotkey: "Alt+X".to_string(),
-            retention_days: 15,
-            max_items: 1000,
+            launcher_hotkey: default_launcher_hotkey(),
+            clipboard_hotkey: default_clipboard_hotkey(),
+            actions_hotkey: default_actions_hotkey(),
+            retention_days: default_retention_days(),
+            max_items: default_max_items(),
+            record_text: true,
+            record_image: true,
+            record_files: true,
+            excluded_apps: default_excluded_apps(),
+            theme: default_theme(),
             autostart: false,
-            theme: "system".to_string(),
+            pause_recording: false,
+            restore_clipboard_after_paste: false,
         }
     }
+}
+
+impl Settings {
+    /// 合法的保留天数（-1 = 永不）
+    pub const VALID_RETENTION_DAYS: [i32; 5] = [7, 15, 30, 90, -1];
+    /// 条数上限范围
+    pub const MIN_ITEMS: i32 = 1000;
+    pub const MAX_ITEMS_LIMIT: i32 = 50000;
+
+    /// 校验全部字段；错误信息为中文，用于 command 层拒绝非法 patch
+    pub fn validate(&self) -> Result<(), String> {
+        let hotkeys = [
+            ("启动器热键", &self.launcher_hotkey),
+            ("剪贴板热键", &self.clipboard_hotkey),
+            ("划词热键", &self.actions_hotkey),
+        ];
+        for (name, accelerator) in hotkeys {
+            validate_hotkey(accelerator).map_err(|reason| format!("{}：{}", name, reason))?;
+        }
+
+        // 三个热键不能相同，否则必然注册冲突
+        if self.launcher_hotkey == self.clipboard_hotkey
+            || self.launcher_hotkey == self.actions_hotkey
+            || self.clipboard_hotkey == self.actions_hotkey
+        {
+            return Err("三个全局热键不能重复".to_string());
+        }
+
+        if !Self::VALID_RETENTION_DAYS.contains(&self.retention_days) {
+            return Err("保留天数只支持 7 / 15 / 30 / 90 天或永不".to_string());
+        }
+
+        if !(Self::MIN_ITEMS..=Self::MAX_ITEMS_LIMIT).contains(&self.max_items) {
+            return Err(format!(
+                "条数上限需在 {} 到 {} 之间",
+                Self::MIN_ITEMS,
+                Self::MAX_ITEMS_LIMIT
+            ));
+        }
+
+        if !["system", "light", "dark"].contains(&self.theme.as_str()) {
+            return Err("主题只支持 system / light / dark".to_string());
+        }
+
+        for app_name in &self.excluded_apps {
+            let trimmed = app_name.trim();
+            if trimmed.is_empty() || trimmed.len() != app_name.len() {
+                return Err("排除应用名称不能为空或含首尾空格".to_string());
+            }
+            if app_name.len() > 260 {
+                return Err("排除应用名称过长".to_string());
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// 热键格式校验：必须为「修饰键+主键」形式，每段非空
+///
+/// 只校验格式，不检测是否被占用（占用属 T-103 运行时行为）。
+fn validate_hotkey(accelerator: &str) -> Result<(), String> {
+    let trimmed = accelerator.trim();
+    if trimmed.is_empty() {
+        return Err("不能为空".to_string());
+    }
+
+    let parts: Vec<&str> = trimmed.split('+').collect();
+    if parts.iter().any(|part| part.trim().is_empty()) {
+        return Err("格式错误，示例：Alt+Space".to_string());
+    }
+    if parts.len() < 2 {
+        return Err("至少需要一个修饰键，示例：Alt+Space".to_string());
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,4 +307,144 @@ pub struct ClipboardDetail {
     pub pinned: bool,
     pub truncated: bool,
     pub source_app: Option<String>,
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 默认设置校验通过() {
+        assert!(Settings::default().validate().is_ok());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 非法保留天数被拒绝() {
+        let first = Settings {
+            retention_days: 16,
+            ..Settings::default()
+        };
+        assert!(first.validate().is_err());
+
+        let second = Settings {
+            retention_days: -2,
+            ..Settings::default()
+        };
+        assert!(second.validate().is_err());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 条数上限越界被拒绝() {
+        let low = Settings {
+            max_items: 999,
+            ..Settings::default()
+        };
+        assert!(low.validate().is_err());
+
+        let high = Settings {
+            max_items: 50_001,
+            ..Settings::default()
+        };
+        assert!(high.validate().is_err());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 热键格式错误被拒绝() {
+        assert!(Settings {
+            launcher_hotkey: String::new(),
+            ..Settings::default()
+        }
+        .validate()
+        .is_err());
+        assert!(Settings {
+            launcher_hotkey: "Space".to_string(),
+            ..Settings::default()
+        }
+        .validate()
+        .is_err());
+        assert!(Settings {
+            launcher_hotkey: "Alt++Space".to_string(),
+            ..Settings::default()
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 主题非法被拒绝() {
+        assert!(Settings {
+            theme: "purple".to_string(),
+            ..Settings::default()
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 排除应用空值被拒绝() {
+        assert!(Settings {
+            excluded_apps: vec![" KeePassXC.exe".to_string()],
+            ..Settings::default()
+        }
+        .validate()
+        .is_err());
+        assert!(Settings {
+            excluded_apps: vec![String::new()],
+            ..Settings::default()
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 旧JSON缺字段时补默认() {
+        let json = r#"{"launcher_hotkey":"Alt+Space"}"#;
+        let settings: Settings = serde_json::from_str(json).expect("parse partial json");
+        assert_eq!(settings.max_items, 10_000);
+        assert!(settings.record_image);
+        assert!(!settings.restore_clipboard_after_paste);
+        assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 设置保存读取往返() {
+        let storage = crate::services::storage::ClipboardStorage::open_in_memory()
+            .expect("open in-memory storage");
+        let settings = Settings {
+            max_items: 2000,
+            excluded_apps: vec!["KeePassXC.exe".to_string()],
+            restore_clipboard_after_paste: true,
+            ..Settings::default()
+        };
+
+        storage.save_settings(&settings).expect("save settings");
+        let loaded = storage.load_settings();
+        assert_eq!(loaded, settings);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 三个热键相同被拒绝() {
+        let first = Settings {
+            launcher_hotkey: "Alt+V".to_string(),
+            clipboard_hotkey: "Alt+V".to_string(),
+            ..Settings::default()
+        };
+        assert!(first.validate().is_err());
+
+        let second = Settings {
+            launcher_hotkey: "Alt+X".to_string(),
+            actions_hotkey: "Alt+X".to_string(),
+            ..Settings::default()
+        };
+        assert!(second.validate().is_err());
+    }
 }

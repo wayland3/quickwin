@@ -1,4 +1,5 @@
 pub mod clipboard;
+pub mod settings;
 
 use crate::error::AppError;
 use crate::services::hotkey::{HotkeyAction, HotkeyManager, HotkeyStatus};
@@ -81,5 +82,39 @@ pub async fn hotkey_rebind(
         "actions" => HotkeyAction::Actions,
         _ => return Err(AppError::Internal(format!("invalid action: {}", action))),
     };
-    hotkey_manager.rebind(&app, action_enum, &accelerator)
+
+    let success = hotkey_manager.rebind(&app, action_enum, &accelerator)?;
+
+    // 改绑成功后同步写入 settings（保持 settings 与运行时一致）
+    if success {
+        let path = app
+            .try_state::<crate::services::storage::DbPath>()
+            .map(|state| state.as_path().to_path_buf());
+
+        if let Some(path) = path {
+            let action_clone = action.clone();
+            let accelerator_clone = accelerator.clone();
+
+            tauri::async_runtime::spawn(async move {
+                let _ = tauri::async_runtime::spawn_blocking(move || {
+                    let mut storage =
+                        crate::services::storage::ClipboardStorage::open_write_at(&path)?;
+                    let _ = storage.transaction_update_settings(|current| {
+                        let mut next = current.clone();
+                        match action_clone.as_str() {
+                            "launcher" => next.launcher_hotkey = accelerator_clone,
+                            "clipboard" => next.clipboard_hotkey = accelerator_clone,
+                            "actions" => next.actions_hotkey = accelerator_clone,
+                            _ => {}
+                        }
+                        Ok(next)
+                    });
+                    Ok::<(), AppError>(())
+                })
+                .await;
+            });
+        }
+    }
+
+    Ok(success)
 }

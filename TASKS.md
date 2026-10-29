@@ -16,8 +16,8 @@
 
 ## 当前焦点
 
-**M1 已完成**（2026-10-27）。**M2 剪贴板历史**推进中：T-201～T-205 已完成；T-106 已补勾选，
-下一个是 T-107 设置读写（依赖 T-106），随后 T-206 保留策略与 T-108 IPC 契约。
+**M1 已完成**（2026-10-27）。**M2 剪贴板历史**推进中：T-201～T-205 已完成；T-106/T-107 已补勾选。
+下一个是 T-108 IPC 契约与类型对齐，或 T-206 保留策略（依赖 T-107 已完成）。
 
 **注意**：T-101 至 T-105 均已完成，M1 出口条件满足（热键呼出/隐藏、焦点恢复、SendInput 全部手工验证待用户执行）。
 
@@ -214,13 +214,35 @@
 - 并发测试：100 写 + 100 查无锁错误；重启一致；integrity_check=ok
 - 交叉评审：GLM-5.3 PASS（两轮），详见 docs/reviews/T-106.md
 
-### [ ] T-107 设置读写
+### [x] T-107 设置读写（2026-10-29）
 - `settings` 表存 JSON + Rust 侧强类型 `Settings`（serde 默认值 + 校验）
 - 关键项：热键、TTL 天数、条数/容量上限、媒体类型开关、排除应用、主题、开机自启、暂停记录
 - 变更后广播 `settings://changed`，前端即时生效（热键项由服务处理）
 
 验收：改设置后重启保持；非法值（TTL=0、热键格式错）被拒绝并回退默认；前端能收到变更事件。
 依赖：T-106。
+
+**实现备注（2026-10-29）**：
+- schema v2 migration：`settings` 表（单条 JSON，id=1 约束）；v1→v2 测试验证剪贴板数据保留
+- `Settings` 全字段带 `#[serde(default=...)]`，旧 JSON 缺字段自动补默认；`validate` 校验热键格式/
+  保留天数/条数范围/主题/排除应用/三热键不重复；失败返回 `SettingsInvalid(String)`
+- `transaction_update_settings` 用 `BEGIN IMMEDIATE` 事务内读-改-写，避免丢更新
+- 启动时 `load_settings` → 按存储键注册热键（失败回退默认键）；autostart 启动对账；
+  PasteOptions 同步；DB 打不开降级回退默认设置（不阻断启动）
+- `hotkey_rebind` 成功后异步写回 settings
+- `RuntimeFlags` 改为 `pause_until: Mutex<Option<Instant>>`，到期自动清除；
+  `Some(0)` 恢复；`None` 用 1 年模拟；托盘新增「恢复记录」
+- 监听线程每 2s 重载设置，执行暂停/媒体开关/排除应用过滤
+- 前端 `settings://changed` 监听，failed 列表（热键占用）toast 提示
+- 测试：89 Rust passed / 1 ignored（事务回滚/幂等/成功、暂停到期/永久/未暂停、三热键重复）；
+  前端 43 passed；verify 全绿
+- 交叉评审：GLM-5.3 PASS（第 3 轮），详见 docs/reviews/T-107.md
+- **遗留（不阻塞，排期后续）**：
+  1. `register_startup_hotkeys` configured 与 default 相同且被占用时，同一键进 failed 两次
+  2. `hotkey_rebind` 异步写回失败被静默吞掉，成功写回不广播 `settings://changed`
+  3. 事务内重读 `unwrap_or_default()` 静默吞解析错误且不 validate
+  4. autostart 失败前端无感知
+  5. 启动热键注册（配置键被占用 → 回退默认 → 重启重试）需真机手测
 
 ### [ ] T-108 IPC 契约与类型对齐
 - `lib/ipc.ts` 封装所有 command，参数/返回值类型与 `models.rs` 一一对应

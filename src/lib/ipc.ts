@@ -3,6 +3,7 @@ import type {
   ClipFilter,
   ClipboardDetail,
   ClipboardListResult,
+  Settings,
 } from './clipboard';
 
 export const ipc = {
@@ -72,5 +73,21 @@ export const ipc = {
 
   async clipboardSetRestoreAfterPaste(enabled: boolean): Promise<void> {
     return invoke<void>('clipboard_set_restore_after_paste', { enabled });
+  },
+
+  async settingsGet(): Promise<Settings> {
+    return invoke<Settings>('settings_get');
+  },
+
+  async settingsUpdate(patch: Partial<Settings>): Promise<Settings> {
+    return invoke<Settings>('settings_update', { patch });
+  },
+
+  async settingsReset(): Promise<Settings> {
+    return invoke<Settings>('settings_reset');
+  },
+
+  async settingsSetPaused(durationSeconds: number | null): Promise<void> {
+    return invoke<void>('settings_set_paused', { durationS: durationSeconds });
   },
 };

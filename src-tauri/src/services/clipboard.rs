@@ -4,7 +4,9 @@
 // 入库成功发送 `clipboard://changed`（节流 500ms），失败发送 `clipboard://insert-error`（不节流）。
 
 use crate::error::AppError;
-use crate::platform::clipboard::{get_sequence_number, read_clipboard_content, ClipboardEntry};
+use crate::platform::clipboard::{
+    get_sequence_number, read_clipboard_content, ClipboardContent, ClipboardEntry,
+};
 use crate::platform::focus::capture_foreground;
 use crate::services::storage::{content_hash, ClipboardStorage};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -55,6 +57,55 @@ impl ThrottledEmitter {
         }
 
         Ok(should_emit)
+    }
+}
+
+/// 设置的进程内运行时覆盖（不持久化）
+///
+/// 用于托盘暂停：
+/// - 「暂停直到重启」：`pause_until=Some(now+1年)`（用 Instant 模拟，重启后状态自然消失）
+/// - 「暂停 30 分钟」：`pause_until=Some(now+30min)`，到期自动恢复
+/// - `pause_until=None` 表示不暂停
+#[derive(Clone)]
+pub struct RuntimeFlags {
+    pause_until: Arc<Mutex<Option<Instant>>>,
+}
+
+impl RuntimeFlags {
+    pub fn new() -> Self {
+        Self {
+            pause_until: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// 设置暂停截止时间：`None`=清除暂停（恢复记录），`Some(at)`=定时恢复
+    pub fn set_pause_until(&self, until: Option<Instant>) {
+        if let Ok(mut state) = self.pause_until.lock() {
+            *state = until;
+        }
+    }
+
+    /// 是否当前应暂停（定时已过会自动清除并返回 false）
+    pub fn is_paused(&self, now: Instant) -> bool {
+        let Ok(mut state) = self.pause_until.lock() else {
+            return false;
+        };
+
+        match *state {
+            None => false,
+            Some(until) if until > now => true,
+            Some(_) => {
+                // 定时暂停已过期，自动恢复
+                *state = None;
+                false
+            }
+        }
+    }
+}
+
+impl Default for RuntimeFlags {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -190,8 +241,13 @@ pub struct ClipboardMonitor {
 impl ClipboardMonitor {
     /// 启动剪贴板监听
     ///
-    /// `suppression` 由 paste 流程共享，用于跳过粘贴写入产生的回声。
-    pub fn start(app: AppHandle, suppression: PasteSuppression) -> Result<Self, AppError> {
+    /// - `suppression` 由 paste 流程共享，用于跳过粘贴回声
+    /// - `flags` 提供「暂停直到重启」的进程内覆盖
+    pub fn start(
+        app: AppHandle,
+        suppression: PasteSuppression,
+        flags: RuntimeFlags,
+    ) -> Result<Self, AppError> {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_clone = stop_flag.clone();
 
@@ -201,6 +257,9 @@ impl ClipboardMonitor {
         let handle = std::thread::spawn(move || {
             let mut last_seq = get_sequence_number().unwrap_or(0);
             let emitter = ThrottledEmitter::new();
+            // 设置每 2s 从库里重新加载，兼顾实时性与开销
+            let mut settings = storage.load_settings();
+            let mut settings_checked = Instant::now();
 
             log::info!("clipboard monitor started");
 
@@ -209,6 +268,17 @@ impl ClipboardMonitor {
 
                 if stop_clone.load(Ordering::Relaxed) {
                     break;
+                }
+
+                if settings_checked.elapsed() >= Duration::from_secs(2) {
+                    settings = storage.load_settings();
+                    settings_checked = Instant::now();
+                }
+
+                // 暂停记录：持久化开关或进程内定时/永久暂停
+                if settings.pause_recording || flags.is_paused(Instant::now()) {
+                    last_seq = get_sequence_number().unwrap_or(last_seq);
+                    continue;
                 }
 
                 let current_seq = match get_sequence_number() {
@@ -239,6 +309,24 @@ impl ClipboardMonitor {
 
                 let mut entry = entry;
                 attach_source_app(&mut entry);
+
+                // 媒体类型开关：被关闭的类型不入库（不重新捕获前台窗口，沿用已有信息）
+                if !type_enabled(&settings, &entry.content) {
+                    log::debug!("clipboard type disabled in settings, skipped");
+                    continue;
+                }
+
+                // 排除应用：命中则完全不入库（通配匹配随 T-207）
+                if let Some(source) = &entry.source_app {
+                    if settings
+                        .excluded_apps
+                        .iter()
+                        .any(|app_name| app_name.eq_ignore_ascii_case(source))
+                    {
+                        log::debug!("clipboard source excluded, skipped");
+                        continue;
+                    }
+                }
 
                 // 序列号覆盖不到时（例如范围 seal 晚于轮询），按内容 hash 兜底
                 match content_hash(&entry.content) {
@@ -333,6 +421,17 @@ fn read_with_retry(stop_flag: &AtomicBool) -> Option<ClipboardEntry> {
     None
 }
 
+/// 媒体类型开关：判断该内容类型是否允许入库
+fn type_enabled(settings: &crate::models::Settings, content: &ClipboardContent) -> bool {
+    match content {
+        ClipboardContent::Text(_) | ClipboardContent::Html(_) | ClipboardContent::Rtf(_) => {
+            settings.record_text
+        }
+        ClipboardContent::Image { .. } => settings.record_image,
+        ClipboardContent::Files(_) => settings.record_files,
+    }
+}
+
 /// 记录来源应用（进程名）。窗口标题暂不采集，避免引入隐私风险。
 fn attach_source_app(entry: &mut ClipboardEntry) {
     if let Some(foreground) = capture_foreground() {
@@ -409,5 +508,40 @@ mod tests {
         suppression.seal(20, 21, Some("hash-a".to_string()), now);
         assert!(suppression.should_skip_hash("hash-a", now));
         assert!(!suppression.should_skip_hash("hash-b", now));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 定时暂停到期自动恢复() {
+        let flags = RuntimeFlags::new();
+        let start = Instant::now();
+        let until = start + Duration::from_millis(50);
+
+        flags.set_pause_until(Some(until));
+        assert!(flags.is_paused(start));
+        assert!(flags.is_paused(start + Duration::from_millis(30)));
+        assert!(!flags.is_paused(start + Duration::from_millis(60)));
+
+        // 过期后状态应被清除
+        assert!(!flags.is_paused(start + Duration::from_millis(100)));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 永久暂停不会到期() {
+        let flags = RuntimeFlags::new();
+        let start = Instant::now();
+        let until = start + Duration::from_secs(60 * 60 * 24 * 365);
+
+        flags.set_pause_until(Some(until));
+        assert!(flags.is_paused(start));
+        assert!(flags.is_paused(start + Duration::from_secs(60)));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 未暂停时返回false() {
+        let flags = RuntimeFlags::new();
+        assert!(!flags.is_paused(Instant::now()));
     }
 }

@@ -47,6 +47,28 @@ export interface ClipboardListResult {
   total: number;
 }
 
+/** 与 Rust `models::Settings` 一一对应 */
+export interface Settings {
+  launcher_hotkey: string;
+  clipboard_hotkey: string;
+  actions_hotkey: string;
+  retention_days: number;
+  max_items: number;
+  record_text: boolean;
+  record_image: boolean;
+  record_files: boolean;
+  excluded_apps: string[];
+  theme: 'system' | 'light' | 'dark' | string;
+  autostart: boolean;
+  pause_recording: boolean;
+  restore_clipboard_after_paste: boolean;
+}
+
+export interface SettingsChangedPayload {
+  keys: string[];
+  failed: string[];
+}
+
 export const FILTERS: ReadonlyArray<{ id: ClipFilter; label: string }> = [
   { id: 'all', label: '全部' },
   { id: 'text', label: '文本' },

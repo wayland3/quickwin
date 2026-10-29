@@ -106,6 +106,40 @@ function App() {
       },
     );
 
+    // 托盘暂停记录事件：转到设置服务（30 分钟=Some(1800)，恢复=Some(0)，直到重启=null）
+    const unlistenClipboardPause = listen<number | null>(
+      'clipboard://pause',
+      (event) => {
+        const duration = event.payload;
+        ipc
+          .settingsSetPaused(duration)
+          .then(() => {
+            const message =
+              duration === null
+                ? '已暂停记录（直到重启）'
+                : duration === 0
+                  ? '已恢复记录'
+                  : '已暂停记录 30 分钟';
+            setToast({ message, level: 'info' });
+          })
+          .catch(() => undefined);
+      },
+    );
+
+    // 设置变更：热键占用等情况通过统一 toast 提示
+    const unlistenSettingsChanged = listen<{
+      keys: string[];
+      failed: string[];
+    }>('settings://changed', (event) => {
+      const failed = event.payload?.failed ?? [];
+      if (failed.length > 0) {
+        setToast({
+          message: `热键 ${failed.join('、')} 已被其他程序占用`,
+          level: 'info',
+        });
+      }
+    });
+
     return () => {
       unlistenShow.then(f => f());
       unlistenShown.then(f => f());
@@ -114,6 +148,8 @@ function App() {
       unlistenInsertError.then(f => f());
       unlistenToast.then(f => f());
       unlistenHotkeyFailed.then(f => f());
+      unlistenClipboardPause.then(f => f());
+      unlistenSettingsChanged.then(f => f());
       window.removeEventListener('keydown', handleKeyDown);
     };
   }, []);

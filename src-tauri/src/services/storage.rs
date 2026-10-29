@@ -36,7 +36,7 @@ const DETAIL_COLUMNS: &str = "id, kind, preview, text_body, html, rtf, file_list
 const PREVIEW_MAX_CHARS: usize = 512;
 
 /// 当前 schema 版本
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// v1 schema
 const SCHEMA_V1: &str = r#"
@@ -75,7 +75,13 @@ CREATE VIRTUAL TABLE clipboard_fts USING fts5(
 );
 "#;
 
-/// 入库结果
+/// v2 schema：设置表（单条 JSON）
+const SCHEMA_V2: &str = r#"
+CREATE TABLE settings (
+    id    INTEGER PRIMARY KEY CHECK (id = 1),
+    value TEXT NOT NULL
+);
+"#;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InsertOutcome {
     /// 新条目，附带 id
@@ -202,41 +208,56 @@ impl ClipboardStorage {
         Ok(())
     }
 
-    /// 执行迁移（当前仅 v0 → v1）
+    /// 执行迁移：按版本逐级升级（v0→v1→v2…），禁止跳级
     fn migrate(&mut self) -> Result<(), AppError> {
-        let version: i64 = self
-            .conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .map_err(|e| AppError::Storage(format!("failed to read user_version: {}", e)))?;
-
-        if version == SCHEMA_VERSION {
-            return Ok(());
-        }
-
-        if version != 0 {
-            // 未来版本：需要按顺序补迁移，禁止跳过
+        let mut version = self.read_user_version()?;
+        if version > SCHEMA_VERSION {
             return Err(AppError::Storage(format!(
                 "unsupported schema version: {}",
                 version
             )));
         }
 
-        let tx = self
-            .conn
-            .transaction()
-            .map_err(|e| AppError::Storage(format!("failed to begin migration: {}", e)))?;
+        while version < SCHEMA_VERSION {
+            match version {
+                0 => {
+                    self.apply_version(1, SCHEMA_V1)?;
+                    log::info!("database migrated: version=1");
+                }
+                1 => {
+                    self.apply_version(2, SCHEMA_V2)?;
+                    log::info!("database migrated: version=2");
+                }
+                other => {
+                    return Err(AppError::Storage(format!(
+                        "missing migration for version: {}",
+                        other
+                    )))
+                }
+            }
+            version = self.read_user_version()?;
+        }
 
-        tx.execute_batch(SCHEMA_V1)
-            .map_err(|e| AppError::Storage(format!("failed to apply schema v1: {}", e)))?;
-
-        tx.pragma_update(None, "user_version", SCHEMA_VERSION)
-            .map_err(|e| AppError::Storage(format!("failed to set user_version: {}", e)))?;
-
-        tx.commit()
-            .map_err(|e| AppError::Storage(format!("failed to commit migration: {}", e)))?;
-
-        log::info!("database migrated: version={}", SCHEMA_VERSION);
         Ok(())
+    }
+
+    /// 应用单个版本：独立事务执行 SQL 并更新 user_version
+    fn apply_version(&mut self, target: i64, sql: &str) -> Result<(), AppError> {
+        let tx = self.conn.transaction().map_err(|e| {
+            AppError::Storage(format!("failed to begin migration v{}: {}", target, e))
+        })?;
+
+        tx.execute_batch(sql)
+            .map_err(|e| AppError::Storage(format!("failed to apply schema v{}: {}", target, e)))?;
+
+        tx.pragma_update(None, "user_version", target)
+            .map_err(|e| {
+                AppError::Storage(format!("failed to set user_version v{}: {}", target, e))
+            })?;
+
+        tx.commit().map_err(|e| {
+            AppError::Storage(format!("failed to commit migration v{}: {}", target, e))
+        })
     }
 
     /// 启动时校验 FTS 与主表行数一致，不一致则重建
@@ -617,14 +638,14 @@ impl ClipboardStorage {
         let mut storage = Self { conn, data_dir };
         let version = storage.read_user_version()?;
 
-        if version == 0 {
-            // 并发首读时另一个连接可能已抢先完成迁移：失败后再读一次版本，已是当前版本则放行
+        if version < SCHEMA_VERSION {
+            // 并发首读时另一个连接可能已抢先完成迁移：失败后再读一次版本，已到当前版本则放行
             if let Err(err) = storage.migrate() {
-                if storage.read_user_version()? != SCHEMA_VERSION {
+                if storage.read_user_version()? < SCHEMA_VERSION {
                     return Err(err);
                 }
             }
-        } else if version != SCHEMA_VERSION {
+        } else if version > SCHEMA_VERSION {
             return Err(AppError::Storage(format!(
                 "unsupported schema version: {}",
                 version
@@ -639,6 +660,133 @@ impl ClipboardStorage {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|e| AppError::Storage(format!("failed to read user_version: {}", e)))
     }
+
+    /// 读取设置；表为空或解析失败时回退默认（不写库，不阻断启动）
+    pub fn load_settings(&self) -> crate::models::Settings {
+        use crate::models::Settings;
+
+        let result: Result<Option<String>, _> = self
+            .conn
+            .query_row("SELECT value FROM settings WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .optional();
+
+        match result {
+            Ok(Some(json)) => match serde_json::from_str::<Settings>(&json) {
+                Ok(settings) => match settings.validate() {
+                    Ok(()) => settings,
+                    Err(reason) => {
+                        log::warn!("stored settings invalid, using defaults: {}", reason);
+                        Settings::default()
+                    }
+                },
+                Err(e) => {
+                    log::warn!("failed to parse stored settings, using defaults: {}", e);
+                    Settings::default()
+                }
+            },
+            Ok(None) => Settings::default(),
+            Err(e) => {
+                log::warn!("failed to read settings, using defaults: {}", e);
+                Settings::default()
+            }
+        }
+    }
+
+    /// 写入设置（UPSERT 单条 JSON）
+    pub fn save_settings(&self, settings: &crate::models::Settings) -> Result<(), AppError> {
+        let json = serde_json::to_string(settings)
+            .map_err(|e| AppError::Storage(format!("failed to serialize settings: {}", e)))?;
+
+        self.conn
+            .execute(
+                "INSERT INTO settings (id, value) VALUES (1, ?1)
+                 ON CONFLICT(id) DO UPDATE SET value = excluded.value",
+                params![json],
+            )
+            .map_err(|e| AppError::Storage(format!("failed to save settings: {}", e)))?;
+        Ok(())
+    }
+
+    /// 事务内的读-改-写设置：BEGIN IMMEDIATE 保证不丢更新
+    ///
+    /// 返回 `(旧设置, 新设置, 变化字段)`；字段无变化时不写库。
+    /// 校验由调用方在事务外先做（这里只负责合并与持久化）。
+    pub fn transaction_update_settings<F>(
+        &mut self,
+        merge: F,
+    ) -> Result<
+        (
+            crate::models::Settings,
+            crate::models::Settings,
+            Vec<String>,
+        ),
+        AppError,
+    >
+    where
+        F: FnOnce(&crate::models::Settings) -> Result<crate::models::Settings, AppError>,
+    {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| AppError::Storage(format!("failed to begin settings tx: {}", e)))?;
+
+        // 事务内重读，避免读到事务外的过期值
+        let current: crate::models::Settings = {
+            let result: Result<Option<String>, _> = tx
+                .query_row("SELECT value FROM settings WHERE id = 1", [], |row| {
+                    row.get(0)
+                })
+                .optional();
+            match result {
+                Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_default(),
+                _ => crate::models::Settings::default(),
+            }
+        };
+
+        let next = merge(&current)?;
+        let changed = diff_settings_keys(&current, &next);
+
+        if !changed.is_empty() {
+            let json = serde_json::to_string(&next)
+                .map_err(|e| AppError::Storage(format!("failed to serialize settings: {}", e)))?;
+            tx.execute(
+                "INSERT INTO settings (id, value) VALUES (1, ?1)
+                 ON CONFLICT(id) DO UPDATE SET value = excluded.value",
+                params![json],
+            )
+            .map_err(|e| AppError::Storage(format!("failed to save settings: {}", e)))?;
+        }
+
+        tx.commit()
+            .map_err(|e| AppError::Storage(format!("failed to commit settings: {}", e)))?;
+        Ok((current, next, changed))
+    }
+}
+
+/// 比较前后设置，返回发生变化的字段名（事务更新用）
+pub fn diff_settings_keys(
+    previous: &crate::models::Settings,
+    next: &crate::models::Settings,
+) -> Vec<String> {
+    let prev_json = serde_json::to_value(previous).ok();
+    let next_json = serde_json::to_value(next).ok();
+
+    let mut keys = Vec::new();
+    if let (Some(prev), Some(next)) = (prev_json, next_json) {
+        if let (Some(prev_obj), Some(next_obj)) = (prev.as_object(), next.as_object()) {
+            let mut all: Vec<&String> = prev_obj.keys().chain(next_obj.keys()).collect();
+            all.sort();
+            all.dedup();
+            for key in all {
+                if prev_obj.get(key) != next_obj.get(key) {
+                    keys.push(key.clone());
+                }
+            }
+        }
+    }
+    keys
 }
 
 /// 计算内容 hash：`sha256(kind + 规范化内容)`
@@ -1553,6 +1701,81 @@ mod tests {
 
     #[test]
     #[allow(non_snake_case)]
+    fn v1库迁移到v2后剪贴板数据保留() {
+        let unique = format!(
+            "quickwin-migrate-v2-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let db_path = std::env::temp_dir().join(unique).join("quickwin.db");
+
+        // 用普通连接手工建 v1 库（不走 open_at，否则会直接迁移到最新版）
+        let dir_path = db_path.parent().expect("db parent");
+        std::fs::create_dir_all(dir_path).expect("create db dir");
+        let v1_conn = rusqlite::Connection::open(&db_path).expect("open v1 connection");
+        v1_conn.execute_batch(SCHEMA_V1).expect("apply v1 schema");
+        v1_conn
+            .pragma_update(None, "user_version", 1)
+            .expect("set v1 version");
+
+        // 插入一条剪贴板数据
+        let hash = "v1-migrate-hash".to_string();
+        v1_conn
+            .execute(
+                "INSERT INTO clipboard_item (
+                    kind, hash, preview, byte_size, created_at, last_copied_at
+                 ) VALUES ('text', ?1, '迁移保留文本', 6, 1000, 1000)",
+                params![hash],
+            )
+            .expect("insert v1 row");
+        drop(v1_conn);
+
+        let version_before: i64 = {
+            let conn = rusqlite::Connection::open(&db_path).expect("open for version");
+            conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+                .expect("read version")
+        };
+        assert_eq!(version_before, 1);
+
+        // 打开时自动迁移到 v2
+        let storage = ClipboardStorage::open_at(&db_path).expect("migrate to v2");
+        let version_after: i64 = storage
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("read migrated version");
+        assert_eq!(version_after, 2);
+
+        let table_exists: i64 = storage
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='settings'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("check settings table");
+        assert_eq!(table_exists, 1);
+
+        let (_items, total) = storage
+            .list("", ClipFilter::All, 50, 0)
+            .expect("list after migration");
+        assert_eq!(total, 1);
+
+        let integrity: String = storage
+            .conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap_or_default();
+        assert_eq!(integrity, "ok");
+
+        if let Some(dir) = db_path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
     fn 并发写入查询无锁错误且数据一致() {
         use std::thread;
 
@@ -1624,5 +1847,62 @@ mod tests {
         if let Some(dir) = db_path.parent() {
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 事务更新失败时回滚不落库() {
+        let mut storage = ClipboardStorage::open_in_memory().expect("open in-memory storage");
+        let initial = storage.load_settings();
+
+        let result = storage.transaction_update_settings(|current| {
+            let _ = current;
+            Err::<crate::models::Settings, crate::error::AppError>(
+                crate::error::AppError::SettingsInvalid("模拟失败".to_string()),
+            )
+        });
+        assert!(result.is_err());
+
+        let after = storage.load_settings();
+        assert_eq!(after, initial);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 事务更新无变化时不写库() {
+        let mut storage = ClipboardStorage::open_in_memory().expect("open in-memory storage");
+        let initial = storage.load_settings();
+        storage.save_settings(&initial).expect("save initial");
+
+        let (current, next, changed) = storage
+            .transaction_update_settings(|current| Ok(current.clone()))
+            .expect("tx update");
+        assert_eq!(current, initial);
+        assert_eq!(next, initial);
+        assert!(changed.is_empty());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 事务更新成功时写入并返回变化字段() {
+        let mut storage = ClipboardStorage::open_in_memory().expect("open in-memory storage");
+
+        let (current, next, changed) = storage
+            .transaction_update_settings(|current| {
+                let mut next = current.clone();
+                next.max_items = 5000;
+                next.theme = "dark".to_string();
+                Ok(next)
+            })
+            .expect("tx update");
+
+        assert_eq!(current.max_items, 10_000);
+        assert_eq!(next.max_items, 5000);
+        assert!(changed.contains(&"max_items".to_string()));
+        assert!(changed.contains(&"theme".to_string()));
+
+        let loaded = storage.load_settings();
+        assert_eq!(loaded.max_items, 5000);
+        assert_eq!(loaded.theme, "dark");
     }
 }
