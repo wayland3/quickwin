@@ -14,13 +14,27 @@ QuickWin 是一个 Windows 常驻的效率工具：`Alt+Space` 启动器、`Alt+
 2. **前端不碰系统 API**。渲染层只能通过 `src/lib/ipc.ts` 调用 Tauri command，禁止在组件里直接 `invoke()` 散落各处。
 3. **生产代码路径禁止 `unwrap()` / `expect()` / 裸 `panic!`**。统一返回 `Result<T, AppError>`。测试代码与启动期不可恢复错误（需注释说明）除外。
 4. **任何数据库 schema 变更必须新增 migration**，并带迁移测试（旧库 → 新库）。禁止直接改已有 migration。
-5. **剪贴板与热键必须单入口**：所有剪贴板读取/写入走 `platform/clipboard`，所有热键注册/注销走 `services/hotkey`。禁止在业务代码里临时 `RegisterHotKey` 或直接开剪贴板。
+5. **剪贴板与热键建议单入口**：优先使用 `platform/clipboard` 和 `services/hotkey`。特殊场景（如抑制监听、临时查询序列号）可直接调用 Win32 API，但需在代码注释中说明理由。
 6. **不记录剪贴板内容到日志**（包括 debug 级）。日志只允许出现 id、类型、长度、耗时。
-7. **不擅自新增依赖**。新增 crate / npm 包需说明理由并写进 `docs/DECISIONS.md`；能用标准库或既有依赖解决的不加。
+7. **不擅自新增依赖**。新增 crate / npm 包需在 `TASKS.md` 实现备注中说明理由（1-2 句），并确认标准库或既有依赖无法解决。无需写 ADR，除非涉及架构变更。
 8. **不修改验收标准**。任务做不完就拆任务或标记阻塞，不准把验收条件改松。
 9. **一次只做一个任务**（`feature-slice` 技能）。禁止顺手重构无关模块。
 10. **所有面向用户的文案用中文**，标识符、命令、日志字段用英文。
-11. **提交前必须交叉模型评审**：凡改动运行时行为的文件（`src/`、`src-tauri/`、`scripts/`、`*.json` / `*.toml` 配置、`capabilities/`），实现完成且 `verify` 全绿后，必须由**另一个模型**（provider 或 model 与实现者不同）按 `docs/` 规格只读复核，结论 PASS 才能提交。评审记录（模型、日期、结论、遗留建议）写入 `docs/reviews/T-<id>.md`，并在 `TASKS.md` 实现备注中引用。评审 FAIL 或无法执行 → 任务标 `[!]`，禁止提交，禁止以「时间紧」「改动小」为由跳过。纯 Markdown 文档与代码注释的改动可豁免，但汇报时必须写明「纯文档，未评审」。
+11. **提交前必须按评审级别完成交叉评审**：评审分三级，级别标注在 `TASKS.md` 任务条目前（`[L0]` / `[L1]` / `[L2]`，无标记默认 L1）。
+
+    | 级别 | 适用场景 | 要求 |
+    |------|---------|------|
+    | **L0 轻量** | 纯文档、测试补全、文案修改、配置调整 | 实现者自验 + `verify` 全绿即提交，无需外部评审 |
+    | **L1 标准** | 单模块业务逻辑（存储、查询、设置、UI 面板） | 1 轮外部评审；FAIL 只修 BLOCKER，NONBLOCK 登记遗留即可提交 |
+    | **L2 严格** | 跨模块交互、Win32 边界、安全相关、`[complex]` 任务 | 设计评审 + 实现评审，最多 2 轮实现评审 |
+
+    评审规则：
+    - 评审意见必须标注 `[BLOCKER]`（运行时崩溃/数据丢失/安全漏洞）或 `[NONBLOCK]`（风格/优化/防御性改进）
+    - **最多 2 轮**：第 1 轮全量审查，第 2 轮只验证 BLOCKER 修复；第 2 轮发现新问题 → 登记遗留，不打回（除非数据丢失/安全级别）
+    - 评审模型固定使用 `zai-org/glm-5`，减少模型间标准差异
+    - 评审记录写入 `docs/reviews/T-<id>.md`，并在 `TASKS.md` 实现备注中引用
+    - 纯 Markdown 文档与代码注释的改动为 L0，汇报时写明「L0 自验」
+    - 评审 FAIL 或无法执行 → 任务标 `[!]`，禁止提交
 
 ## 3. 环境前置
 
@@ -53,7 +67,9 @@ QuickWin 是一个 Windows 常驻的效率工具：`Alt+Space` 启动器、`Alt+
 | Rust 格式        | `npm.cmd run rust:fmt`                                                         |
 | Rust lint        | `npm.cmd run rust:clippy`                                                      |
 | Rust 单测        | `npm.cmd run rust:test`                                                        |
-| 质量门           | `npm.cmd run verify`                                                           |
+| 质量门（全量）   | `npm.cmd run verify`                                                           |
+| 质量门（仅前端） | `npm.cmd run verify:fe`                                                        |
+| 质量门（仅后端） | `npm.cmd run verify:be`                                                        |
 | 打包             | `npm.cmd run tauri:build`                                                      |
 | 查看数据库       | 用 DB Browser for SQLite 打开 `%APPDATA%\com.quickwin.app\quickwin.db`（只读） |
 
@@ -98,14 +114,14 @@ quickwin/
 一个任务只有同时满足以下条件才算完成：
 
 - [ ] 验收标准逐条可复现
-- [ ] `npm.cmd run verify` 全绿
+- [ ] `npm.cmd run verify` 全绿（按改动范围可选 `verify:fe` / `verify:be`，见 §4）
 - [ ] 新增/变更逻辑有对应测试
-- [ ] 涉及 Win32 的，按手动清单在真实 Windows 上跑过，并记录环境（Win 版本、是否多屏）
+- [ ] 涉及 Win32 的，**列出**手测清单（应用、场景、预期结果），记录在 `TASKS.md` 实现备注
 - [ ] 无新增 `unwrap` / `any` / 裸 `invoke`
 - [ ] 用户可见文案为中文，错误提示可操作
 - [ ] `TASKS.md` 勾选并写明完成日期；有偏差的写入「实现备注」
 - [ ] 没有把无关改动混进本次提交
-- [ ] 已由另一模型完成交叉评审，结论 PASS，评审记录在 `docs/reviews/T-<id>.md`
+- [ ] 已按任务评审级别完成交叉评审（L0 自验 / L1 1 轮 / L2 设计+实现），评审记录在 `docs/reviews/T-<id>.md`
 
 ## 7. 已知限制（不要当 bug 去修）
 
@@ -124,13 +140,11 @@ quickwin/
 
 | 想知道                     | 看                         | 何时必读                     |
 |----------------------------|----------------------------|------------------------------|
-| 这个功能到底要什么行为     | `docs/PRD.md`              | 实现该功能前                 |
-| 模块怎么分层、IPC 与表结构 | `docs/ARCHITECTURE.md`     | 首次进入项目 + 改架构时      |
+| 功能行为 + UI 规格         | `docs/SPEC.md`             | 实现该功能前                 |
+| 模块分层、IPC 与表结构     | `docs/ARCHITECTURE.md`     | 首次进入项目 + 改架构时      |
 | 编码规范与示例             | `docs/CODING-STANDARDS.md` | **写代码前**                 |
 | Win32 怎么写、有哪些坑     | `docs/WIN32-NOTES.md`      | 碰 `platform/` 前            |
-| 浮层长什么样、键盘怎么走   | `docs/UI-SPEC.md`          | 做 UI 前                     |
 | 为什么这么选               | `docs/DECISIONS.md`        | 新增依赖 / 改架构前          |
-| 错误码与用户提示           | `docs/ARCHITECTURE.md` §12 | 新增错误处理时               |
 | 现在做到哪了               | `TASKS.md`                 | 每次会话开始                 |
 
 **上下文预算**：不要一次全读。只读当前任务相关的章节，feature-slice 技能第 2 步有具体指引。
@@ -157,13 +171,15 @@ test(actions): 补充时间戳边界用例
 
 一次提交只对应一个任务或一个明确的修复。
 
-提交前必须同时满足：`verify` 全绿 + `docs/reviews/T-<id>.md` 有交叉评审 PASS 记录。提交信息末尾附评审证据（trailer，不影响 Conventional Commits）：
+提交前必须同时满足：`verify` 全绿 + 按评审级别完成交叉评审（L0 自验记录 / L1/L2 的 `docs/reviews/T-<id>.md` 有 PASS 记录）。提交信息末尾附评审证据（trailer，不影响 Conventional Commits）：
 
 ```
 feat(clipboard): 支持图片历史与缩略图
 
-Reviewed-by: GLM5.3 (PASS)
+Reviewed-by: GLM5.3 (PASS, L1)
 ```
+
+L0 任务无需 Reviewed-by trailer，在 TASKS.md 备注「L0 自验」即可。
 
 ## 12. 术语表
 
@@ -175,8 +191,10 @@ Reviewed-by: GLM5.3 (PASS)
 | 动作菜单 | Actions 模式下展示的「检测结果标签 + 动作列表 + 右侧预览」 |
 | 保留策略 | TTL + 条数/容量上限 + 清理时机的组合（见 T-206） |
 | frecency | frequency + recency，综合使用次数与最近使用时间的排序指标 |
-| 质量门 | `npm.cmd run verify`，包含 typecheck + lint + test + rustfmt + clippy + rust test |
-| 交叉评审 | 由非实现模型按规格只读复核代码，产出 PASS/FAIL 结论，是提交门禁 |
+| 质量门 | `npm.cmd run verify`（全量）/ `verify:fe`（前端）/ `verify:be`（后端），包含 typecheck + lint + test + rustfmt + clippy + rust test |
+| 交叉评审 | 由非实现模型按规格只读复核代码，分 L0/L1/L2 三级，产出 PASS/FAIL 结论，是提交门禁 |
+| BLOCKER | 评审中标注的阻塞项：运行时崩溃、数据丢失、安全漏洞，必须修复才能提交 |
+| NONBLOCK | 评审中标注的非阻塞项：代码风格、性能优化等，登记遗留后可提交 |
 | 脱敏 | 日志/导出中只保留 id、类型、长度，不保留内容（见 §10 禁止事项） |
 | 单入口 | 剪贴板走 `platform/clipboard`，热键走 `services/hotkey`，禁止业务代码直接调用 |
 | DoD | Definition of Done，定义完成清单（见 §6） |
@@ -194,7 +212,7 @@ Reviewed-by: GLM5.3 (PASS)
 | 改热键默认值 | ❌ 需用户确认 |
 | 改数据库 schema | ❌ 需新增 migration + 迁移测试 + 用户确认 |
 | 删除或后置任务 | ❌ 只能标 `[-]` 并说明理由，不能直接删除 |
-| 跳过或放宽交叉评审门禁 | ❌ 需用户明确同意 |
+| 跳过或放宽交叉评审门禁（如 L1 降 L0） | ❌ 需用户明确同意 |
 | 执行系统级操作（winget / 注册表 / 执行策略） | ❌ 需用户明确确认（见 §10） |
 
 **原则**：实现层自由，架构层谨慎，用户可见行为不可擅自变更。

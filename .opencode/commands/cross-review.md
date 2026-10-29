@@ -9,7 +9,7 @@ description: 用另一个模型对当前改动做只读交叉评审，产出 PAS
 1. 任务 ID 与 `TASKS.md` 中的验收标准原文
 2. 改动范围：`git diff`，或改动文件清单 + 完整内容
 3. `npm.cmd run verify` 分项结果
-4. 规格：`docs/PRD.md`、`ARCHITECTURE.md`、`WIN32-NOTES.md`、`UI-SPEC.md` 的相关章节
+4. 规格：`docs/SPEC.md`、`ARCHITECTURE.md`、`WIN32-NOTES.md` 的相关章节
 
 ## 评审清单（逐条给结论，不适用写「N/A + 原因」）
 

@@ -451,7 +451,7 @@ source_weight: start_menu 1.0 | app_paths 0.95 | uwp 0.9 | builtin 1.05
 
 `Settings` 为单一结构体（serde），持久化到 `settings` 表的一行 JSON 或多行 key；读取时对每个字段做范围校验，非法值回退默认并记录一条 warn（不含用户数据）。
 
-默认值集中在 `services/config.rs::Settings::default()`，是唯一事实来源；`docs/PRD.md` 第 8 节必须与之一致。
+默认值集中在 `services/config.rs::Settings::default()`，是唯一事实来源；`docs/SPEC.md` §9 必须与之一致。
 
 ## 12. 错误模型
 

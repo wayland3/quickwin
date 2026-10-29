@@ -73,7 +73,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 └── logs\            # 运行日志（不记录剪贴板内容）
 ```
 
-剪贴板历史默认保留 **15 天**（按最后一次使用时间计算），置顶项豁免；容量与隐私规则见 [`docs/PRD.md`](./docs/PRD.md)。
+剪贴板历史默认保留 **15 天**（按最后一次使用时间计算），置顶项豁免；容量与隐私规则见 [`docs/SPEC.md`](./docs/SPEC.md) §7.7。
 
 ## 已知限制
 
@@ -87,8 +87,8 @@ cargo test --manifest-path src-tauri/Cargo.toml
 |---|---|
 | [`AGENTS.md`](./AGENTS.md) | AI 协作总纲：硬规则、命令、目录、定义完成 |
 | [`TASKS.md`](./TASKS.md) | 里程碑与任务清单（唯一进度源） |
-| [`docs/PRD.md`](./docs/PRD.md) | 功能规格与验收标准 |
+| [`docs/SPEC.md`](./docs/SPEC.md) | 功能规格与 UI 规范 |
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | 架构、IPC 契约、数据库 schema |
 | [`docs/WIN32-NOTES.md`](./docs/WIN32-NOTES.md) | Win32 平台坑位与实现要点 |
-| [`docs/UI-SPEC.md`](./docs/UI-SPEC.md) | 浮层交互与视觉规范 |
+| [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | 技术架构与实现指南 |
 | [`docs/DECISIONS.md`](./docs/DECISIONS.md) | 架构决策记录（ADR） |
