@@ -226,7 +226,7 @@
 
 ### [x] [L1] T-107 设置读写（2026-10-29）
 - `settings` 表存 JSON + Rust 侧强类型 `Settings`（serde 默认值 + 校验）
-- 关键项：热键、TTL 天数、条数/容量上限、媒体类型开关、排除应用、主题、开机自启、暂停记录
+- 关键项：热键、TTL 天数、条数/容量上限、媒体类型开关、主题、开机自启、暂停记录
 - 变更后广播 `settings://changed`，前端即时生效（热键项由服务处理）
 
 验收：改设置后重启保持；非法值（TTL=0、热键格式错）被拒绝并回退默认；前端能收到变更事件。
@@ -235,14 +235,14 @@
 **实现备注（2026-10-29）**：
 - schema v2 migration：`settings` 表（单条 JSON，id=1 约束）；v1→v2 测试验证剪贴板数据保留
 - `Settings` 全字段带 `#[serde(default=...)]`，旧 JSON 缺字段自动补默认；`validate` 校验热键格式/
-  保留天数/条数范围/主题/排除应用/三热键不重复；失败返回 `SettingsInvalid(String)`
+  保留天数/条数范围/主题/三热键不重复；失败返回 `SettingsInvalid(String)`
 - `transaction_update_settings` 用 `BEGIN IMMEDIATE` 事务内读-改-写，避免丢更新
 - 启动时 `load_settings` → 按存储键注册热键（失败回退默认键）；autostart 启动对账；
   PasteOptions 同步；DB 打不开降级回退默认设置（不阻断启动）
 - `hotkey_rebind` 成功后异步写回 settings
 - `RuntimeFlags` 改为 `pause_until: Mutex<Option<Instant>>`，到期自动清除；
   `Some(0)` 恢复；`None` 用 1 年模拟；托盘新增「恢复记录」
-- 监听线程每 2s 重载设置，执行暂停/媒体开关/排除应用过滤
+- 监听线程每 2s 重载设置，执行暂停/媒体开关过滤
 - 前端 `settings://changed` 监听，failed 列表（热键占用）toast 提示
 - 测试：89 Rust passed / 1 ignored（事务回滚/幂等/成功、暂停到期/永久/未暂停、三热键重复）；
   前端 43 passed；verify 全绿
