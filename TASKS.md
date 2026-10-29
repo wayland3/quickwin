@@ -26,8 +26,7 @@
 
 ## 当前焦点
 
-**M2 已完成**（2026-10-29）。**M3 启动器**推进中：T-301 应用索引已完成（2026-10-29），
-下一个是 T-302 索引刷新。
+**M2 已完成**（2026-10-29）。**M3 启动器**推进中：T-301、T-302 已完成，下一个是 T-303 排序与检索。
 
 **注意**：T-101 至 T-105 均已完成，M1 出口条件满足（热键呼出/隐藏、焦点恢复、SendInput 全部手工验证待用户执行）。
 
@@ -486,12 +485,32 @@
 - 待真机手测（需在用户目标机执行）：人工抽查 30 个开始菜单应用核对命中率；触发一次重建并核对
   面板/搜索可用（入口随 T-303/T-304）；UWP 启动待 T-304 接入 `IApplicationActivationManager`
 
-### [ ] [L1] T-302 索引刷新
+### [x] [L1] T-302 索引刷新 — 2026-10-29
 - 启动时异步刷新；开始菜单目录变化（`ReadDirectoryChangesW` 或 10 分钟轮询）触发增量更新
 - 删除失效项；新装应用 ≤10 分钟可被搜到
 
 验收：卸载一个应用后 10 分钟内从结果消失；新装应用 10 分钟内可搜到；刷新不阻塞 UI。
 依赖：T-301。
+
+**实现备注（2026-10-29）**：
+- `services/appindex.rs` 新增 `rebuild_index`：扫描 → 与 `load_app_index` 逐行对比 → 未变化跳过写库，
+  变化时单事务全量替换（失效项自然清除）
+- 新增 `IndexRebuildLock`：后台刷新与 `app_index_rebuild` 命令共用，避免并发全量替换
+- 新增 `IndexRefresher`：独立线程启动即建一次，之后每 600s 轮询；1s 粒度检查停止标志，
+  App 退出（Drop）最多等 1s；启动不阻塞 setup / UI
+- `storage.rs` 新增 `load_app_index`（按 key 排序）
+- `lib.rs` 注册锁并启动刷新线程；`commands/launcher.rs` 改用 `rebuild_index`
+- 偏差：v1 按 ARCHITECTURE §9 用 10 分钟轮询，不用 `ReadDirectoryChangesW`；「增量更新」实现为
+  「全量扫描 + 结果对比，无变化不写库」，理由：整批扫描本机 0.35s、实现简单且不会漏掉注册表变化
+- 顺手修复：测试内存库改为每实例独立临时 blob 目录（`#[cfg(test)] cleanup_dir`，drop 时清理），
+  修复并行测试互相删目录导致的偶发失败（与任务无关但会阻塞质量门）
+- 测试：117 Rust passed / 3 ignored，49 前端 passed；`npm.cmd run verify` 全绿；连续 3 次全量测试稳定
+- 交叉评审：GLM-5.3 PASS（1 轮），详见 `docs/reviews/T-302.md`
+- 遗留（NONBLOCK）：`rows_equal` 对重复 key 依赖原顺序（扫描层已保证唯一）；锁覆盖整次扫描，
+  手动重建需排队 ≤1.4s；刷新间隔从上次完成后起算（600s + 扫描耗时，仍满足 ≤10 分钟）
+- 待真机手测：启动后日志出现 `app index refreshed`，重启后出现 `unchanged`；
+  卸载一个应用/删除一个 `.lnk` 后 ≤10 分钟索引中消失；新装应用 ≤10 分钟出现；
+  `cargo test --lib 真机刷新应用索引两次 -- --ignored --nocapture` 验证第二次短路
 
 ### [ ] [L1] T-303 排序与检索
 - 匹配：子串优先 + 模糊（`fuzzy-matcher`）+ 首字母缩写（`vsc` → Visual Studio Code）

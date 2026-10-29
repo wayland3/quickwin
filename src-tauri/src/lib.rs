@@ -68,6 +68,7 @@ pub fn run() {
         .manage(OverlayManager::new())
         .manage(HotkeyManager::new())
         .manage(services::paste::PasteOptions::new())
+        .manage(services::appindex::IndexRebuildLock::default())
         .setup(|app| {
             log::info!("QuickWin starting");
             services::tray::setup_tray(app.handle())?;
@@ -140,6 +141,16 @@ pub fn run() {
                     log::error!("clipboard monitor failed to start: {}", e);
                 }
             }
+
+            // 应用索引：后台线程启动即建一次，之后每 10 分钟轮询（不阻塞 UI）
+            let rebuild_lock = app
+                .state::<services::appindex::IndexRebuildLock>()
+                .inner()
+                .clone();
+            app.manage(services::appindex::IndexRefresher::start(
+                db_path.clone(),
+                rebuild_lock,
+            ));
 
             Ok(())
         })

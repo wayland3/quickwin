@@ -5,10 +5,15 @@
 //! - 快捷方式解析 / 注册表 / UWP 枚举在 `platform::apps`；
 //! - 落库在 `services::storage::replace_app_index`。
 
+use crate::error::AppError;
 use crate::platform::apps::{self, AppPathEntry, ResolvedShortcut, UwpApp};
-use crate::services::storage::AppIndexRow;
+use crate::services::storage::{AppIndexRow, ClipboardStorage};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 /// 来源标识
 pub const SOURCE_START_MENU: &str = "start_menu";
@@ -309,6 +314,120 @@ fn uwp_candidate(app: UwpApp) -> AppCandidate {
     }
 }
 
+/// 后台刷新周期：ARCHITECTURE §9 规定 v1 用 10 分钟轮询替代 `ReadDirectoryChangesW`
+pub const REFRESH_INTERVAL: Duration = Duration::from_secs(600);
+
+/// 停止检查粒度（保证退出时最多等 1s）
+const STOP_POLL: Duration = Duration::from_secs(1);
+
+/// 索引重建互斥锁：命令与后台刷新共用，避免并发全量替换
+#[derive(Debug, Clone, Default)]
+pub struct IndexRebuildLock(Arc<Mutex<()>>);
+
+impl IndexRebuildLock {
+    fn guard(&self) -> MutexGuard<'_, ()> {
+        // 锁中毒时继续使用内部值：重建是全量替换，事务保证一致性
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// 扫描并写入索引；结果与现有索引一致时跳过写库
+pub fn rebuild_index(db_path: &Path, lock: &IndexRebuildLock) -> Result<usize, AppError> {
+    let _guard = lock.guard();
+
+    let scan = collect();
+    let mut storage = ClipboardStorage::open_write_at(db_path)?;
+    let existing = storage.load_app_index()?;
+
+    if rows_equal(&existing, &scan.rows) {
+        log::info!("app index unchanged: rows={}", existing.len());
+        return Ok(existing.len());
+    }
+
+    let written = storage.replace_app_index(&scan.rows, now_ms())?;
+    log::info!("app index refreshed: rows={}", written);
+    Ok(written)
+}
+
+/// 行集合比较：与顺序无关，只比对持久化字段
+pub fn rows_equal(left: &[AppIndexRow], right: &[AppIndexRow]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut left_sorted: Vec<&AppIndexRow> = left.iter().collect();
+    let mut right_sorted: Vec<&AppIndexRow> = right.iter().collect();
+    left_sorted.sort_by(|a, b| a.key.cmp(&b.key));
+    right_sorted.sort_by(|a, b| a.key.cmp(&b.key));
+
+    left_sorted.iter().zip(right_sorted).all(|(a, b)| {
+        a.key == b.key
+            && a.name == b.name
+            && a.target == b.target
+            && a.args == b.args
+            && a.kind == b.kind
+            && a.source == b.source
+            && a.icon_path == b.icon_path
+    })
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// 后台刷新线程：启动即重建一次，之后每 10 分钟轮询
+pub struct IndexRefresher {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl IndexRefresher {
+    /// 启动后台线程（立即返回，不阻塞调用方）
+    pub fn start(db_path: PathBuf, lock: IndexRebuildLock) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_for_thread = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || loop {
+            if let Err(error) = rebuild_index(&db_path, &lock) {
+                log::warn!("app index refresh failed: {}", error);
+            }
+            if !wait_for_next(&stop_for_thread) {
+                break;
+            }
+        });
+
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for IndexRefresher {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// 分片睡眠：停止标志置位后最多 1s 退出
+fn wait_for_next(stop: &AtomicBool) -> bool {
+    let mut slept = Duration::ZERO;
+    while slept < REFRESH_INTERVAL {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        std::thread::sleep(STOP_POLL);
+        slept += STOP_POLL;
+    }
+    !stop.load(Ordering::Relaxed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,6 +592,64 @@ mod tests {
         assert_eq!(names, vec!["zeta", "alpha", "beta"]);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn app_test_row(key: &str, name: &str) -> AppIndexRow {
+        AppIndexRow {
+            key: key.to_string(),
+            name: name.to_string(),
+            target: key.to_string(),
+            args: None,
+            kind: "win32".to_string(),
+            source: "start_menu".to_string(),
+            icon_path: None,
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 索引比较与顺序无关且能发现变化() {
+        let first = app_test_row("a.exe", "Alpha");
+        let second = app_test_row("b.exe", "Beta");
+
+        assert!(rows_equal(
+            &[first.clone(), second.clone()],
+            &[second.clone(), first.clone()]
+        ));
+
+        let mut changed = second.clone();
+        changed.name = "Beta 2".to_string();
+        assert!(!rows_equal(
+            &[first.clone(), second.clone()],
+            &[first.clone(), changed]
+        ));
+        assert!(!rows_equal(&[first], &[]));
+    }
+
+    /// 真机手测入口：先运行一次应用生成数据库，再执行
+    /// `cargo test --lib 真机刷新应用索引两次 -- --ignored --nocapture`
+    #[test]
+    #[ignore = "仅真机手测运行，会写真实数据库"]
+    #[allow(non_snake_case)]
+    fn 真机刷新应用索引两次() {
+        let Some(data_dir) = dirs::data_dir() else {
+            println!("skip: no data dir");
+            return;
+        };
+        let db_path = data_dir.join("com.quickwin.app").join("quickwin.db");
+        let lock = IndexRebuildLock::default();
+
+        match rebuild_index(&db_path, &lock) {
+            Ok(first) => println!("first rebuild rows={}", first),
+            Err(error) => {
+                println!("first rebuild failed: {:?}", error);
+                return;
+            }
+        }
+        match rebuild_index(&db_path, &lock) {
+            Ok(second) => println!("second rebuild rows={}（内容未变时应短路）", second),
+            Err(error) => println!("second rebuild failed: {:?}", error),
+        }
     }
 
     /// 真机手测入口：`cargo test --lib 真机扫描应用索引 -- --ignored --nocapture`

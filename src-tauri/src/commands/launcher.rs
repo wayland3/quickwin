@@ -5,31 +5,27 @@
 
 use crate::error::AppError;
 use crate::models::AppIndexRebuildResult;
-use crate::services::storage::{ClipboardStorage, DbPath};
+use crate::services::appindex::{rebuild_index, IndexRebuildLock};
+use crate::services::storage::DbPath;
 use tauri::Manager;
 
-/// 全量重建应用索引，返回写入条数
+/// 全量重建应用索引，返回写入条数（内容未变化时跳过写库）
 #[tauri::command]
 pub async fn app_index_rebuild(app: tauri::AppHandle) -> Result<AppIndexRebuildResult, AppError> {
     let db_path = app
         .try_state::<DbPath>()
         .map(|state| state.as_path().to_path_buf())
         .ok_or_else(|| AppError::Storage("数据库尚未就绪".to_string()))?;
+    let lock = app
+        .try_state::<IndexRebuildLock>()
+        .map(|state| state.inner().clone())
+        .unwrap_or_default();
 
-    let count = tauri::async_runtime::spawn_blocking(move || {
-        let scan = crate::services::appindex::collect();
-        let mut storage = ClipboardStorage::open_write_at(&db_path)?;
-        storage.replace_app_index(&scan.rows, now_ms())
-    })
-    .await
-    .map_err(|error| AppError::Internal(format!("app index rebuild join failed: {}", error)))??;
+    let count = tauri::async_runtime::spawn_blocking(move || rebuild_index(&db_path, &lock))
+        .await
+        .map_err(|error| {
+            AppError::Internal(format!("app index rebuild join failed: {}", error))
+        })??;
 
     Ok(AppIndexRebuildResult { count })
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
-        .unwrap_or(0)
 }

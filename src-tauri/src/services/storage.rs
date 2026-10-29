@@ -186,11 +186,22 @@ pub struct ClipboardStorage {
     conn: Connection,
     /// 数据目录（数据库与 blobs 的父目录）
     data_dir: PathBuf,
+    /// 测试用：内存库的临时 blob 目录需要在 drop 时清理
+    #[cfg(test)]
+    cleanup_dir: bool,
+}
+
+#[cfg(test)]
+impl Drop for ClipboardStorage {
+    fn drop(&mut self) {
+        if self.cleanup_dir {
+            let _ = std::fs::remove_dir_all(&self.data_dir);
+        }
+    }
 }
 
 impl ClipboardStorage {
-    /// 创建生产环境存储实例
-    ///
+    /// 创建生产环境存储实例    ///
     /// 数据库位于 `%APPDATA%\com.quickwin.app\quickwin.db`，blob 位于同目录下 `blobs\`。
     pub fn new() -> Result<Self, AppError> {
         let data_dir = Self::default_data_dir()?;
@@ -211,7 +222,12 @@ impl ClipboardStorage {
             .map_err(|e| AppError::Storage(format!("failed to open database: {}", e)))?;
         Self::configure(&conn)?;
 
-        let mut storage = Self { conn, data_dir };
+        let mut storage = Self {
+            conn,
+            data_dir,
+            #[cfg(test)]
+            cleanup_dir: false,
+        };
         storage.migrate()?;
         storage.check_fts_consistency()?;
 
@@ -221,13 +237,24 @@ impl ClipboardStorage {
     /// 内存数据库（仅测试使用）
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self, AppError> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        // 每个实例独立目录：并行测试会同时写 blob，共享目录会导致清理互相干扰
+        static TEST_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = TEST_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
+        let data_dir =
+            std::env::temp_dir().join(format!("quickwin-test-{}-{}", std::process::id(), seq));
+        std::fs::create_dir_all(&data_dir)
+            .map_err(|e| AppError::Storage(format!("failed to create test directory: {}", e)))?;
+
         let conn = Connection::open_in_memory()
             .map_err(|e| AppError::Storage(format!("failed to open in-memory database: {}", e)))?;
         Self::configure(&conn)?;
 
         let mut storage = Self {
             conn,
-            data_dir: std::env::temp_dir().join("quickwin-test"),
+            data_dir,
+            cleanup_dir: true,
         };
         storage.migrate()?;
         storage.check_fts_consistency()?;
@@ -1020,6 +1047,36 @@ impl ClipboardStorage {
         Ok(inserted)
     }
 
+    /// 读取全部应用索引行（按 key 排序，便于比较与测试）
+    pub fn load_app_index(&self) -> Result<Vec<AppIndexRow>, AppError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT key, name, target, args, kind, source, icon_path FROM app_index ORDER BY key",
+            )
+            .map_err(|e| AppError::Storage(format!("failed to prepare app index query: {}", e)))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(AppIndexRow {
+                    key: row.get(0)?,
+                    name: row.get(1)?,
+                    target: row.get(2)?,
+                    args: row.get(3)?,
+                    kind: row.get(4)?,
+                    source: row.get(5)?,
+                    icon_path: row.get(6)?,
+                })
+            })
+            .map_err(|e| AppError::Storage(format!("failed to query app index: {}", e)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(
+                row.map_err(|e| AppError::Storage(format!("failed to read app index row: {}", e)))?,
+            );
+        }
+        Ok(out)
+    }
+
     /// 打开可写连接（业务写命令用）：跳过启动期 FTS 一致性全表计数
     ///
     /// 一致性校验只在应用启动的监听线程初始化时执行一次；置顶/删除等高频路径不应
@@ -1034,7 +1091,12 @@ impl ClipboardStorage {
             .map_err(|e| AppError::Storage(format!("failed to open database: {}", e)))?;
         Self::configure(&conn)?;
 
-        let storage = Self { conn, data_dir };
+        let storage = Self {
+            conn,
+            data_dir,
+            #[cfg(test)]
+            cleanup_dir: false,
+        };
         let version = storage.read_user_version()?;
         if version != SCHEMA_VERSION {
             return Err(AppError::Storage(format!(
@@ -1065,7 +1127,12 @@ impl ClipboardStorage {
             .map_err(|e| AppError::Storage(format!("failed to open database: {}", e)))?;
         Self::configure(&conn)?;
 
-        let mut storage = Self { conn, data_dir };
+        let mut storage = Self {
+            conn,
+            data_dir,
+            #[cfg(test)]
+            cleanup_dir: false,
+        };
         let version = storage.read_user_version()?;
 
         if version < SCHEMA_VERSION {
@@ -2339,6 +2406,11 @@ mod tests {
                 ("c.exe".to_string(), "Gamma".to_string(), 2000),
             ]
         );
+
+        let loaded = storage.load_app_index().expect("load app index");
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].key, "b.exe");
+        assert_eq!(loaded[1].key, "c.exe");
     }
 
     #[test]
