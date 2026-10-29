@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { ipc } from './lib/ipc';
 import { listen } from '@tauri-apps/api/event';
 import { ClipboardPanel } from './windows/ClipboardPanel';
+import { LauncherPanel } from './windows/LauncherPanel';
 
 function App() {
   const [pingResult, setPingResult] = useState<string>('');
@@ -171,6 +172,8 @@ function App() {
 
       {mode === 'clipboard' ? (
         <ClipboardPanel />
+      ) : mode === 'launcher' ? (
+        <LauncherPanel />
       ) : (
         <div className="qw-placeholder">
           <h1 className="mb-4 text-4xl font-bold">QuickWin</h1>

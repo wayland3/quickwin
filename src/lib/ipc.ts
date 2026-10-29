@@ -5,7 +5,7 @@ import type {
   ClipboardListResult,
   Settings,
 } from './clipboard';
-import type { AppIndexRebuildResult } from './launcher';
+import type { AppIndexRebuildResult, LauncherQueryResult } from './launcher';
 
 /** 后端错误结构 */
 interface AppError {
@@ -94,6 +94,10 @@ export const ipc = {
 
   async appIndexRebuild(): Promise<AppIndexRebuildResult> {
     return invokeWrapper<AppIndexRebuildResult>('app_index_rebuild');
+  },
+
+  async launcherQuery(query: string, limit?: number): Promise<LauncherQueryResult> {
+    return invokeWrapper<LauncherQueryResult>('launcher_query', { query, limit });
   },
 
   async clipboardList(params: {

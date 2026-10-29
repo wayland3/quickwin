@@ -26,7 +26,7 @@
 
 ## 当前焦点
 
-**M2 已完成**（2026-10-29）。**M3 启动器**推进中：T-301、T-302 已完成，下一个是 T-303 排序与检索。
+**M2 已完成**（2026-10-29）。**M3 启动器**推进中：T-301～T-303 已完成，下一个是 T-304 执行与动作。
 
 **注意**：T-101 至 T-105 均已完成，M1 出口条件满足（热键呼出/隐藏、焦点恢复、SendInput 全部手工验证待用户执行）。
 
@@ -512,13 +512,35 @@
   卸载一个应用/删除一个 `.lnk` 后 ≤10 分钟索引中消失；新装应用 ≤10 分钟出现；
   `cargo test --lib 真机刷新应用索引两次 -- --ignored --nocapture` 验证第二次短路
 
-### [ ] [L1] T-303 排序与检索
+### [x] [L1] T-303 排序与检索 — 2026-10-29
 - 匹配：子串优先 + 模糊（`fuzzy-matcher`）+ 首字母缩写（`vsc` → Visual Studio Code）
 - 排序：匹配分 × frecency（次数 + 最近使用衰减）
 - 12 条上限，分组「应用 / 命令 / 网页」
 
 验收：输入 `chr` 首位是 Chrome；常用应用排在使用少的同名应用前；无结果时给「网页搜索」兜底项。
 依赖：T-301。
+
+**实现备注（2026-10-29）**：
+- 新增 `services/ranking.rs`：`match_query`（完全 1.0 / 前缀 0.9 / 词首缩写 0.85 / 子串 0.7 /
+  子序列模糊 0.4–0.6）、`acronym`、`frecency`（1 + ln(1+count) × 0.5^(days/14)）、
+  `source_weight`、`rank_apps`（同分按标题长度、再按 key）、`with_web_fallback`
+- 新增 `launcher_query` 命令：`spawn_blocking` 读索引 + 使用频率，返回 `{ items, hint }`；
+  `models.rs` 新增 `LauncherQueryResult`，前端 `ipc.ts` + `lib/launcher.ts` + 契约 fixture 同步
+- schema v4：`usage_stat` 表 + `load_usage_stats` / `bump_usage`（频率记录由 T-304 打开应用时调用），
+  带 v3→v4 迁移测试
+- 新增 `src/windows/LauncherPanel.tsx`：搜索框（80ms 防抖）、分组标题、↑↓ 选择、Enter 提示待接入、
+  空态/加载态/错误提示；`App.tsx` 在 `mode=launcher` 时渲染；查询词跨隐藏保留（SPEC §4）
+- 偏差 1：未引入 `fuzzy-matcher`（新增依赖需 ADR + 用户确认），改用自研子序列匹配；
+  匹配档位与分值仍按 ARCHITECTURE §8.1
+- 偏差 2：本任务包含启动器面板 UI（任务条目只写检索/排序），否则无法观察验收；
+  Enter 打开 / Shift+Enter / Ctrl+Enter / Ctrl+C / Tab 补全随 T-304/T-305
+- 偏差 3：命令/文件分组与文件结果随 T-306/T-402；当前只有「应用 / 网页」两组
+- 测试：131 Rust passed / 4 ignored，53 前端 passed；`npm.cmd run verify` 全绿
+- 真机抽查（本机未装 Chrome）：`fir` → Firefox 首位、`vsc` → Visual Studio Code 首位、
+  `微信` → 精确命中；可用 `cargo test --lib 真机排序抽查 -- --ignored --nocapture` 复跑
+- 交叉评审：GLM-5.3 PASS（1 轮），详见 `docs/reviews/T-303.md`
+- 遗留（NONBLOCK）：每次查询新开连接并全量读索引（规模变大后随 T-605 评估缓存）；limit 双重 clamp；
+  副标题直接显示 exe 完整路径，UI 打磨随 T-304/T-604
 
 ### [ ] [L1] T-304 执行与动作
 - `Enter` 打开；`Shift+Enter` 以管理员身份；`Ctrl+Enter` 打开所在位置；`Ctrl+C` 复制路径

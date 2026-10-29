@@ -30,7 +30,7 @@ pub struct ClipboardItem {
     pub thumb_path: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum LauncherKind {
     #[serde(rename = "app")]
     App,
@@ -57,6 +57,15 @@ pub struct LauncherItem {
 pub struct AppIndexRebuildResult {
     /// 写入的应用条数
     pub count: usize,
+}
+
+/// 启动器查询结果（`launcher_query` 返回）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LauncherQueryResult {
+    /// 最多 12 条，已按得分排序
+    pub items: Vec<LauncherItem>,
+    /// 可选提示（如前缀补全建议）
+    pub hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -574,6 +583,52 @@ mod settings_tests {
         let result = AppIndexRebuildResult { count: 0 };
 
         let value = serde_json::to_value(result).expect("serialize");
+        let mut actual: Vec<String> = value.as_object().expect("object").keys().cloned().collect();
+        actual.sort();
+
+        let mut expected_sorted = expected;
+        expected_sorted.sort();
+
+        assert_eq!(actual, expected_sorted);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn LauncherItem字段集合与前端fixture一致() {
+        let fixture = include_str!("../../src/lib/contract/LauncherItem.keys.json");
+        let expected: Vec<String> = serde_json::from_str(fixture).expect("parse fixture");
+
+        let item = LauncherItem {
+            key: "a.exe".to_string(),
+            title: "Alpha".to_string(),
+            subtitle: None,
+            kind: LauncherKind::App,
+            icon: None,
+            score: 1.0,
+        };
+
+        let value = serde_json::to_value(&item).expect("serialize");
+        let mut actual: Vec<String> = value.as_object().expect("object").keys().cloned().collect();
+        actual.sort();
+
+        let mut expected_sorted = expected;
+        expected_sorted.sort();
+
+        assert_eq!(actual, expected_sorted);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn LauncherQueryResult字段集合与前端fixture一致() {
+        let fixture = include_str!("../../src/lib/contract/LauncherQueryResult.keys.json");
+        let expected: Vec<String> = serde_json::from_str(fixture).expect("parse fixture");
+
+        let result = LauncherQueryResult {
+            items: vec![],
+            hint: None,
+        };
+
+        let value = serde_json::to_value(&result).expect("serialize");
         let mut actual: Vec<String> = value.as_object().expect("object").keys().cloned().collect();
         actual.sort();
 

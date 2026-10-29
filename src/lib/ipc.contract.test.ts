@@ -5,13 +5,15 @@ import type {
   ClipboardListResult,
   Settings,
 } from './clipboard';
-import type { AppIndexRebuildResult } from './launcher';
+import type { AppIndexRebuildResult, LauncherItem, LauncherQueryResult } from './launcher';
 
 import ClipboardItemKeys from './contract/ClipboardItem.keys.json';
 import ClipboardDetailKeys from './contract/ClipboardDetail.keys.json';
 import ClipboardListResultKeys from './contract/ClipboardListResult.keys.json';
 import SettingsKeys from './contract/Settings.keys.json';
 import AppIndexRebuildResultKeys from './contract/AppIndexRebuildResult.keys.json';
+import LauncherItemKeys from './contract/LauncherItem.keys.json';
+import LauncherQueryResultKeys from './contract/LauncherQueryResult.keys.json';
 
 /**
  * IPC 契约测试
@@ -112,6 +114,31 @@ describe('IPC 契约', () => {
 
       const keys = Object.keys(result).sort();
       expect(keys).toEqual(AppIndexRebuildResultKeys.sort());
+    });
+  });
+
+  describe('LauncherItem 字段集合', () => {
+    it('与 Rust 序列化一致', () => {
+      const item: LauncherItem = {
+        key: 'a.exe',
+        title: 'Alpha',
+        subtitle: null,
+        kind: 'app',
+        icon: null,
+        score: 1,
+      };
+
+      const keys = Object.keys(item).sort();
+      expect(keys).toEqual(LauncherItemKeys.sort());
+    });
+  });
+
+  describe('LauncherQueryResult 字段集合', () => {
+    it('与 Rust 序列化一致', () => {
+      const result: LauncherQueryResult = { items: [], hint: null };
+
+      const keys = Object.keys(result).sort();
+      expect(keys).toEqual(LauncherQueryResultKeys.sort());
     });
   });
 });

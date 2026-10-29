@@ -37,7 +37,7 @@ const DETAIL_COLUMNS: &str = "id, kind, preview, text_body, html, rtf, file_list
 const PREVIEW_MAX_CHARS: usize = 512;
 
 /// 当前 schema 版本
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// v1 schema
 const SCHEMA_V1: &str = r#"
@@ -100,6 +100,16 @@ CREATE TABLE app_index (
 CREATE INDEX ix_app_name ON app_index(name);
 "#;
 
+/// v4 schema：使用频率（frecency）
+const SCHEMA_V4: &str = r#"
+CREATE TABLE usage_stat (
+    item_key     TEXT PRIMARY KEY,
+    kind         TEXT NOT NULL,
+    use_count    INTEGER NOT NULL DEFAULT 0,
+    last_used_at INTEGER NOT NULL
+);
+"#;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InsertOutcome {
     /// 新条目，附带 id
@@ -157,6 +167,15 @@ pub struct AppIndexRow {
     pub source: String,
     /// 图标位置（`path` 或 `path,index`）
     pub icon_path: Option<String>,
+}
+
+/// 使用频率行（`usage_stat`）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageStat {
+    pub key: String,
+    pub kind: String,
+    pub use_count: i64,
+    pub last_used_at: i64,
 }
 
 /// 数据库路径（只读配置，供 command 层按需开短连接）
@@ -313,6 +332,10 @@ impl ClipboardStorage {
                 2 => {
                     self.apply_version(3, SCHEMA_V3)?;
                     log::info!("database migrated: version=3");
+                }
+                3 => {
+                    self.apply_version(4, SCHEMA_V4)?;
+                    log::info!("database migrated: version=4");
                 }
                 other => {
                     return Err(AppError::Storage(format!(
@@ -1045,6 +1068,46 @@ impl ClipboardStorage {
             .map_err(|e| AppError::Storage(format!("failed to commit app index: {}", e)))?;
 
         Ok(inserted)
+    }
+
+    /// 读取全部使用频率（frecency 排序用）
+    pub fn load_usage_stats(&self) -> Result<Vec<UsageStat>, AppError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT item_key, kind, use_count, last_used_at FROM usage_stat")
+            .map_err(|e| AppError::Storage(format!("failed to prepare usage query: {}", e)))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(UsageStat {
+                    key: row.get(0)?,
+                    kind: row.get(1)?,
+                    use_count: row.get(2)?,
+                    last_used_at: row.get(3)?,
+                })
+            })
+            .map_err(|e| AppError::Storage(format!("failed to query usage: {}", e)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(
+                row.map_err(|e| AppError::Storage(format!("failed to read usage row: {}", e)))?,
+            );
+        }
+        Ok(out)
+    }
+
+    /// 记录一次使用（不存在则插入，存在则次数 +1 并刷新时间）
+    pub fn bump_usage(&mut self, key: &str, kind: &str, now_ms: i64) -> Result<(), AppError> {
+        self.conn
+            .execute(
+                "INSERT INTO usage_stat (item_key, kind, use_count, last_used_at)
+                 VALUES (?1, ?2, 1, ?3)
+                 ON CONFLICT(item_key) DO UPDATE SET
+                   use_count = usage_stat.use_count + 1,
+                   last_used_at = ?3",
+                params![key, kind, now_ms],
+            )
+            .map_err(|e| AppError::Storage(format!("failed to bump usage: {}", e)))?;
+        Ok(())
     }
 
     /// 读取全部应用索引行（按 key 排序，便于比较与测试）
@@ -2456,6 +2519,81 @@ mod tests {
             "1000 条替换耗时 {:?}，超过 2s 预算",
             elapsed
         );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn v3库迁移到v4后应用索引保留() {
+        let unique = format!(
+            "quickwin-migrate-v4-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let db_path = std::env::temp_dir().join(unique).join("quickwin.db");
+
+        let dir_path = db_path.parent().expect("db parent");
+        std::fs::create_dir_all(dir_path).expect("create db dir");
+        let v3_conn = rusqlite::Connection::open(&db_path).expect("open v3 connection");
+        for schema in [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3] {
+            v3_conn.execute_batch(schema).expect("apply schema");
+        }
+        v3_conn
+            .pragma_update(None, "user_version", 3)
+            .expect("set v3 version");
+        v3_conn
+            .execute(
+                "INSERT INTO app_index (key, name, target, kind, source, updated_at)
+                 VALUES ('a.exe', 'Alpha', 'a.exe', 'win32', 'start_menu', 1000)",
+                [],
+            )
+            .expect("insert app row");
+        drop(v3_conn);
+
+        let storage = ClipboardStorage::open_at(&db_path).expect("migrate to v4");
+        let version_after: i64 = storage
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("read migrated version");
+        assert_eq!(version_after, SCHEMA_VERSION);
+
+        let usage_exists: i64 = storage
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='usage_stat'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("check usage_stat table");
+        assert_eq!(usage_exists, 1);
+
+        let apps = storage.load_app_index().expect("load app index");
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].key, "a.exe");
+
+        if let Some(dir) = db_path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 使用频率累加且刷新时间() {
+        let mut storage = open_test_storage();
+        storage
+            .bump_usage("a.exe", "app", 1000)
+            .expect("first bump");
+        storage
+            .bump_usage("a.exe", "app", 2000)
+            .expect("second bump");
+
+        let stats = storage.load_usage_stats().expect("load usage");
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].key, "a.exe");
+        assert_eq!(stats[0].use_count, 2);
+        assert_eq!(stats[0].last_used_at, 2000);
     }
 
     #[test]
