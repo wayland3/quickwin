@@ -447,4 +447,114 @@ mod settings_tests {
         };
         assert!(second.validate().is_err());
     }
+
+    /// IPC 契约测试：验证 Rust 序列化字段集合与前端 fixture 一致
+    ///
+    /// fixture 文件存储在 src/lib/contract/*.keys.json，前端测试读取同一份比对。
+    /// 任一侧删除/重命名字段都会导致测试失败。
+    #[test]
+    #[allow(non_snake_case)]
+    fn ClipboardItem字段集合与前端fixture一致() {
+        let fixture = include_str!("../../src/lib/contract/ClipboardItem.keys.json");
+        let expected: Vec<String> = serde_json::from_str(fixture).expect("parse fixture");
+
+        let item = ClipboardItem {
+            id: 1,
+            kind: ClipKind::Text,
+            preview: String::new(),
+            source_app: None,
+            created_at: 0,
+            last_copied_at: 0,
+            copy_count: 1,
+            pinned: false,
+            sensitive: false,
+            truncated: false,
+            byte_size: 0,
+            thumb_path: None,
+        };
+
+        let value = serde_json::to_value(&item).expect("serialize");
+        let mut actual: Vec<String> = value.as_object().expect("object").keys().cloned().collect();
+        actual.sort();
+
+        let mut expected_sorted = expected;
+        expected_sorted.sort();
+
+        assert_eq!(actual, expected_sorted);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn ClipboardDetail字段集合与前端fixture一致() {
+        let fixture = include_str!("../../src/lib/contract/ClipboardDetail.keys.json");
+        let expected: Vec<String> = serde_json::from_str(fixture).expect("parse fixture");
+
+        let detail = ClipboardDetail {
+            id: 1,
+            kind: ClipKind::Text,
+            preview: String::new(),
+            text_body: None,
+            html: None,
+            rtf: None,
+            file_list: None,
+            file_exists: None,
+            blob_path: None,
+            thumb_path: None,
+            byte_size: 0,
+            created_at: 0,
+            last_copied_at: 0,
+            copy_count: 1,
+            pinned: false,
+            truncated: false,
+            source_app: None,
+        };
+
+        let value = serde_json::to_value(&detail).expect("serialize");
+        let mut actual: Vec<String> = value.as_object().expect("object").keys().cloned().collect();
+        actual.sort();
+
+        let mut expected_sorted = expected;
+        expected_sorted.sort();
+
+        assert_eq!(actual, expected_sorted);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn ClipboardListResult字段集合与前端fixture一致() {
+        let fixture = include_str!("../../src/lib/contract/ClipboardListResult.keys.json");
+        let expected: Vec<String> = serde_json::from_str(fixture).expect("parse fixture");
+
+        let result = ClipboardListResult {
+            items: vec![],
+            total: 0,
+        };
+
+        let value = serde_json::to_value(&result).expect("serialize");
+        let mut actual: Vec<String> = value.as_object().expect("object").keys().cloned().collect();
+        actual.sort();
+
+        let mut expected_sorted = expected;
+        expected_sorted.sort();
+
+        assert_eq!(actual, expected_sorted);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn Settings字段集合与前端fixture一致() {
+        let fixture = include_str!("../../src/lib/contract/Settings.keys.json");
+        let expected: Vec<String> = serde_json::from_str(fixture).expect("parse fixture");
+
+        let settings = Settings::default();
+
+        let value = serde_json::to_value(&settings).expect("serialize");
+        let mut actual: Vec<String> = value.as_object().expect("object").keys().cloned().collect();
+        actual.sort();
+
+        let mut expected_sorted = expected;
+        expected_sorted.sort();
+
+        assert_eq!(actual, expected_sorted);
+    }
 }

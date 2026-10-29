@@ -58,7 +58,7 @@ export interface Settings {
   record_image: boolean;
   record_files: boolean;
   excluded_apps: string[];
-  theme: 'system' | 'light' | 'dark' | string;
+  theme: 'system' | 'light' | 'dark';
   autostart: boolean;
   pause_recording: boolean;
   restore_clipboard_after_paste: boolean;

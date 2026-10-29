@@ -16,8 +16,8 @@
 
 ## 当前焦点
 
-**M1 已完成**（2026-10-27）。**M2 剪贴板历史**推进中：T-201～T-205 已完成；T-106/T-107 已补勾选。
-下一个是 T-108 IPC 契约与类型对齐，或 T-206 保留策略（依赖 T-107 已完成）。
+**M1 已完成**（2026-10-27）。**M2 剪贴板历史**推进中：T-201～T-205 已完成；T-106/T-107/T-108 已补勾选。
+下一个是 T-206 保留策略与容量治理。
 
 **注意**：T-101 至 T-105 均已完成，M1 出口条件满足（热键呼出/隐藏、焦点恢复、SendInput 全部手工验证待用户执行）。
 
@@ -244,13 +244,24 @@
   4. autostart 失败前端无感知
   5. 启动热键注册（配置键被占用 → 回退默认 → 重启重试）需真机手测
 
-### [ ] T-108 IPC 契约与类型对齐
+### [x] T-108 IPC 契约与类型对齐（2026-10-29）
 - `lib/ipc.ts` 封装所有 command，参数/返回值类型与 `models.rs` 一一对应
 - 统一错误处理：`code` 映射为中文 toast；未知错误记录但不泄露内容
 - 一个契约测试：对每个 command 断言 TS 类型字段集合与 Rust 序列化结果一致（可用快照 JSON）
 
 验收：删掉 Rust 某个字段后契约测试失败；前端无散落的 `invoke(`（除 `ipc.ts`）。
 依赖：T-105、T-107。
+
+**实现备注（2026-10-29）**：
+- `ipc.ts` 新增 `invokeWrapper` 统一包装所有 invoke 调用，捕获后端 `AppError` 并映射为中文 toast
+- 错误码映射表 `ERROR_MESSAGES`：覆盖所有 10 个错误码（clipboard.busy、focus.elevated_target 等）
+- 未知错误：`console.error` 记录 code + command 名（不泄露后端 message），统一返回「操作失败，请稍后重试」
+- 新增共享 fixture 文件 `src/lib/contract/*.keys.json`（4 个结构各一个），TS/Rust 双侧测试读取同一份比对
+- 新增 `ipc.contract.test.ts`：4 个契约测试验证 `ClipboardItem`、`ClipboardDetail`、`ClipboardListResult`、`Settings` 字段集合与 Rust 序列化一致
+- Rust 侧新增 4 个契约测试（`models.rs`），用 `include_str!` 读取 fixture，`serde_json::to_value()` 序列化后比对 keys
+- 验收通过：grep 确认前端无散落的 `invoke(`（仅 `ipc.ts` 内部使用）；契约测试字段集合与 Rust 序列化一致
+- 测试：47 前端测试通过（新增 4 个契约测试）；93 Rust 测试通过 / 1 ignored；verify 全绿
+- 交叉评审：GLM-5.3 PASS（第 2 轮；第 1 轮 FAIL 因契约测试与 Rust 零耦合，已修复为共享 fixture 机制），详见 docs/reviews/T-108.md
 
 ---
 
