@@ -348,3 +348,25 @@ UI-SPEC §10 禁止 base64 内联；Tauri 2 提供 asset 自定义协议。
 
 - 引入传递依赖 `http-range`（Tauri 官方默认组合，非自选）。
 - 需要保持 `storage.rs` 落盘目录与 scope 一致，二者任一变更都要同步改。`
+
+---
+
+## ADR-0014 v1 schema 只包含剪贴板表，其余表按里程碑迁移
+
+**状态**：已采纳（2026-10-29，T-106 评审 C2）
+
+**背景**：`ARCHITECTURE §5.2` 原把 `meta / clipboard_item / clipboard_fts / app_index / file_index / usage_stat / settings` 全部列为 v1 schema；实际 v1 只实现了剪贴板两张表。若应用发布后再把剩余表补进 SCHEMA_V1，会违反「禁止修改已发布 migration」。
+
+**决策**：
+- v1 migration（user_version=1）只包含 `clipboard_item` 与 `clipboard_fts`，不再变更；
+- `meta / app_index / file_index / usage_stat / settings` 随对应功能（M3 / M4 / M6）以独立 migration（v2+）落地；
+- `ARCHITECTURE §5.2` 已补版本归属说明，完整 SQL 仅作结构参考。
+
+**理由**：
+- 应用尚未发布，现在明确版本归属成本最低；
+- 每张表与具体里程碑绑定，迁移顺序与功能上线顺序一致；
+- 避免空表提前占用 schema，又在需求变化时被迫改迁移。
+
+**代价**：
+- 后续里程碑各需新增 migration 与迁移测试（本就属于硬规则）；
+- 文档中的完整 schema 与单版本实际结构不同，必须靠版本说明消除歧义。

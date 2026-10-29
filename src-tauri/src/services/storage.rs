@@ -13,7 +13,7 @@ use crate::models::{ClipFilter, ClipKind, ClipboardDetail, ClipboardItem};
 use crate::platform::clipboard::{ClipboardContent, ClipboardEntry, ImageFormat};
 use crate::services::query::{self, SearchKind};
 use rusqlite::types::FromSql;
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -182,19 +182,22 @@ impl ClipboardStorage {
     }
 
     /// 设置连接级 PRAGMA
+    ///
+    /// busy_timeout 必须先设：后续 journal_mode 切换需要排他锁，先有重试保护才能避免
+    /// 并发首开时拿到不吃 busy handler 的硬 SQLITE_BUSY。
     fn configure(conn: &Connection) -> Result<(), AppError> {
-        // journal_mode 会返回一行结果，必须用 query_row 而不是 execute
+        conn.execute_batch(
+            "PRAGMA busy_timeout = 5000;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA foreign_keys = ON;",
+        )
+        .map_err(|e| AppError::Storage(format!("failed to set pragmas: {}", e)))?;
+
+        // journal_mode 返回一行结果，必须用 query_row 而不是 execute
         conn.query_row("PRAGMA journal_mode = WAL", [], |row| {
             row.get::<_, String>(0)
         })
         .map_err(|e| AppError::Storage(format!("failed to set journal_mode: {}", e)))?;
-
-        conn.execute_batch(
-            "PRAGMA synchronous = NORMAL;
-             PRAGMA busy_timeout = 5000;
-             PRAGMA foreign_keys = ON;",
-        )
-        .map_err(|e| AppError::Storage(format!("failed to set pragmas: {}", e)))?;
 
         Ok(())
     }
@@ -237,31 +240,31 @@ impl ClipboardStorage {
     }
 
     /// 启动时校验 FTS 与主表行数一致，不一致则重建
+    ///
+    /// 单语句内同时取两个 COUNT，保证是同一快照；若拆成两条自动提交读，中间插入提交
+    /// 会造成 main=n、fts=n+1 的瞬时不一致，从而误触发全量 rebuild。
     fn check_fts_consistency(&self) -> Result<(), AppError> {
-        let main_count: i64 = self
+        let consistent: bool = self
             .conn
-            .query_row("SELECT COUNT(*) FROM clipboard_item", [], |row| row.get(0))
-            .map_err(|e| AppError::Storage(format!("failed to count clipboard_item: {}", e)))?;
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM clipboard_item)
+                        = (SELECT COUNT(*) FROM clipboard_fts)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| AppError::Storage(format!("failed to check FTS consistency: {}", e)))?;
 
-        let fts_count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM clipboard_fts", [], |row| row.get(0))
-            .map_err(|e| AppError::Storage(format!("failed to count clipboard_fts: {}", e)))?;
-
-        if main_count != fts_count {
-            log::warn!(
-                "FTS inconsistency detected: main={}, fts={}, rebuilding",
-                main_count,
-                fts_count
-            );
-
-            self.conn
-                .execute(
-                    "INSERT INTO clipboard_fts(clipboard_fts) VALUES('rebuild')",
-                    [],
-                )
-                .map_err(|e| AppError::Storage(format!("failed to rebuild FTS: {}", e)))?;
+        if consistent {
+            return Ok(());
         }
+
+        log::warn!("FTS inconsistency detected, rebuilding");
+        self.conn
+            .execute(
+                "INSERT INTO clipboard_fts(clipboard_fts) VALUES('rebuild')",
+                [],
+            )
+            .map_err(|e| AppError::Storage(format!("failed to rebuild FTS: {}", e)))?;
 
         Ok(())
     }
@@ -279,9 +282,11 @@ impl ClipboardStorage {
         let byte_size = byte_size(entry);
         let truncated = entry.truncated as i32;
 
+        // IMMEDIATE：事务开始即排队拿写锁，避免多连接 DEFERRED 先持 SHARED 锁后
+        // 升级写锁造成死锁（该路径不触发 busy_timeout，直接 database is locked）
         let tx = self
             .conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| AppError::Storage(format!("failed to begin transaction: {}", e)))?;
 
         // 1. 去重：同一 hash 只刷新计数与时间
@@ -538,7 +543,7 @@ impl ClipboardStorage {
 
         let tx = self
             .conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| AppError::Storage(format!("failed to begin delete: {}", e)))?;
 
         tx.execute("DELETE FROM clipboard_fts WHERE rowid = ?1", params![id])
@@ -562,6 +567,32 @@ impl ClipboardStorage {
 
         log::debug!("clipboard item deleted: id={}, hard={}", id, hard);
         Ok(())
+    }
+
+    /// 打开可写连接（业务写命令用）：跳过启动期 FTS 一致性全表计数
+    ///
+    /// 一致性校验只在应用启动的监听线程初始化时执行一次；置顶/删除等高频路径不应
+    /// 每次打开都做表级检查。版本必须已是当前版本，未迁移的库不在业务写路径处理。
+    pub fn open_write_at(db_path: &Path) -> Result<Self, AppError> {
+        let data_dir = db_path
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| AppError::Storage("invalid database path".to_string()))?;
+
+        let conn = Connection::open(db_path)
+            .map_err(|e| AppError::Storage(format!("failed to open database: {}", e)))?;
+        Self::configure(&conn)?;
+
+        let storage = Self { conn, data_dir };
+        let version = storage.read_user_version()?;
+        if version != SCHEMA_VERSION {
+            return Err(AppError::Storage(format!(
+                "write connection requires migrated database, version: {}",
+                version
+            )));
+        }
+
+        Ok(storage)
     }
 
     /// 只读路径专用 open：跳过 FTS 一致性全表计数（S5）
@@ -1517,6 +1548,81 @@ mod tests {
                 assert_eq!(total, 0);
             }
             Err(e) => panic!("punctuation query failed: {}", e),
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 并发写入查询无锁错误且数据一致() {
+        use std::thread;
+
+        let unique = format!(
+            "quickwin-concurrent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let db_path = std::env::temp_dir().join(unique).join("quickwin.db");
+
+        // 先初始化 schema，避免多个线程同时对空库迁移
+        let initializer = match ClipboardStorage::open_at(&db_path) {
+            Ok(storage) => storage,
+            Err(e) => panic!("initializer failed: {}", e),
+        };
+        drop(initializer);
+
+        let handles: Vec<thread::JoinHandle<Result<u32, AppError>>> = (0..5)
+            .map(|worker| {
+                let path = db_path.clone();
+                thread::spawn(move || -> Result<u32, AppError> {
+                    let mut storage = ClipboardStorage::open_write_at(&path)?;
+                    let mut stored = 0u32;
+                    for index in 0..20 {
+                        let entry = text_entry(&format!("并发 worker {} 条目 {}", worker, index));
+                        storage.insert(&entry)?;
+                        stored += 1;
+
+                        // 每次写入后在独立只读连接上查询：5 线程 × 20 = 100 次并发查询
+                        let readonly = ClipboardStorage::open_readonly_at(&path)?;
+                        let (items, _total) = readonly.list("并发", ClipFilter::All, 50, 0)?;
+                        let _count = items.len();
+                    }
+                    Ok(stored)
+                })
+            })
+            .collect();
+
+        let mut total_stored = 0u32;
+        for handle in handles {
+            match handle.join() {
+                Ok(Ok(count)) => total_stored += count,
+                Ok(Err(e)) => panic!("worker failed (expected no database is locked): {:?}", e),
+                Err(_) => panic!("worker thread panicked"),
+            }
+        }
+        assert_eq!(total_stored, 100);
+
+        // 重启后数据一致
+        let storage = match ClipboardStorage::open_at(&db_path) {
+            Ok(storage) => storage,
+            Err(e) => panic!("reopen failed: {}", e),
+        };
+        let (_items, total) = match storage.list("", ClipFilter::All, 200, 0) {
+            Ok(result) => result,
+            Err(e) => panic!("count after reopen failed: {}", e),
+        };
+        assert_eq!(total, 100);
+
+        let integrity: String = storage
+            .conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap_or_default();
+        assert_eq!(integrity, "ok");
+
+        if let Some(dir) = db_path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
         }
     }
 }

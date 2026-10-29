@@ -100,6 +100,11 @@ PRAGMA user_version;  -- 迁移版本
 
 ### 5.2 v1 schema
 
+> **版本归属说明（ADR-0014，2026-10-29）**：v1 实际只包含下方 `clipboard_item` 与
+> `clipboard_fts`。`meta`、`app_index`、`file_index`、`usage_stat`、`settings` 不再
+> 属于 v1，将随对应里程碑（M3 / M4 / M6）以独立 migration（v2+）落地，避免在未发布前
+> 反复修改已发布迁移。下方 SQL 保留作为完整结构参考，不代表 v1 一次建成。
+
 ```sql
 -- 键值元数据（索引版本、安装 id 等）
 CREATE TABLE meta (

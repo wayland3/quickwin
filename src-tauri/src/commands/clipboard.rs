@@ -65,7 +65,7 @@ pub async fn clipboard_set_pinned(
     let path = db_path(&app)?;
 
     tauri::async_runtime::spawn_blocking(move || -> Result<(), AppError> {
-        let storage = ClipboardStorage::open_at(&path)?;
+        let storage = ClipboardStorage::open_write_at(&path)?;
         storage.set_pinned(id, pinned)
     })
     .await
@@ -118,7 +118,7 @@ pub async fn clipboard_delete(app: tauri::AppHandle, id: i64, hard: bool) -> Res
     let path = db_path(&app)?;
 
     tauri::async_runtime::spawn_blocking(move || -> Result<(), AppError> {
-        let mut storage = ClipboardStorage::open_at(&path)?;
+        let mut storage = ClipboardStorage::open_write_at(&path)?;
         storage.delete(id, hard)
     })
     .await

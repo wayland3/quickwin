@@ -16,8 +16,8 @@
 
 ## 当前焦点
 
-**M1 已完成**（2026-10-27）。**M2 剪贴板历史**推进中：T-201～T-205 已完成，下一个候选是 T-206
-（保留策略，依赖 T-107；T-106/T-107/T-108 尚未勾选，需先补齐设置与 IPC 契约）或先补 T-103 评审记录。
+**M1 已完成**（2026-10-27）。**M2 剪贴板历史**推进中：T-201～T-205 已完成；T-106 已补勾选，
+下一个是 T-107 设置读写（依赖 T-106），随后 T-206 保留策略与 T-108 IPC 契约。
 
 **注意**：T-101 至 T-105 均已完成，M1 出口条件满足（热键呼出/隐藏、焦点恢复、SendInput 全部手工验证待用户执行）。
 
@@ -193,7 +193,7 @@
 - 所有函数为阻塞函数，禁止在 async 上下文直接调用
 - 交叉评审：GLM-5.3 PASS（第 2 轮修复后），详见 docs/reviews/T-105.md
 
-### [ ] T-106 SQLite 存储层
+### [x] T-106 SQLite 存储层（2026-10-29）
 - 单写线程 + channel；读连接短生命周期；WAL / busy_timeout / foreign_keys
 - `user_version` 迁移框架 + v1 schema（见 `ARCHITECTURE.md` 第 5 节）
 - FTS5（trigram）独立表，写入时同步；1–2 字查询回退 `LIKE`
@@ -201,6 +201,18 @@
 
 验收：并发 100 次写入 + 100 次查询无 `database is locked`；重启后数据一致；迁移测试通过；`PRAGMA integrity_check` 为 ok。
 依赖：T-005。
+
+**实现备注（2026-10-29）**：
+- PRAGMA：busy_timeout=5000（第一步，先于 WAL 切换）、journal_mode=WAL、synchronous=NORMAL、foreign_keys=ON
+- 迁移：user_version 0→1 单事务，高于当前版本报错；幂等测试通过
+- FTS5 trigram 独立表，与主表写入/删除同 IMMEDIATE 事务同步；启动单快照校验不一致才 rebuild；
+  1–2 字与纯标点回退 LIKE
+- **偏差 1（并发模型，评审确认可接受）**：未采用「单写线程 + channel」，改为短连接 +
+  `BEGIN IMMEDIATE`；高频入库仍由监听线程独占长连接
+- **偏差 2（schema 范围）**：v1 只含剪贴板两表，其余表随 M3/M4/M6 走 v2+，见 ADR-0014
+- 写命令走新增 `open_write_at`（跳过一致性计数、要求已迁移）；一致性校验只在启动执行
+- 并发测试：100 写 + 100 查无锁错误；重启一致；integrity_check=ok
+- 交叉评审：GLM-5.3 PASS（两轮），详见 docs/reviews/T-106.md
 
 ### [ ] T-107 设置读写
 - `settings` 表存 JSON + Rust 侧强类型 `Settings`（serde 默认值 + 校验）
