@@ -19,6 +19,7 @@ vi.mock('../lib/ipc', () => ({
     clipboardSetPinned: vi.fn(),
     clipboardDelete: vi.fn(),
     clipboardActivate: vi.fn(),
+    clipboardClear: vi.fn(),
     overlayHide: vi.fn(),
   },
 }));
@@ -73,6 +74,7 @@ beforeEach(() => {
   vi.mocked(ipc.clipboardSetPinned).mockReset().mockResolvedValue(undefined);
   vi.mocked(ipc.clipboardDelete).mockReset().mockResolvedValue(undefined);
   vi.mocked(ipc.clipboardActivate).mockReset().mockResolvedValue(undefined);
+  vi.mocked(ipc.clipboardClear).mockReset().mockResolvedValue(undefined);
   vi.mocked(ipc.overlayHide).mockReset().mockResolvedValue(undefined);
 });
 
@@ -383,5 +385,20 @@ describe('剪贴板面板', () => {
 
     fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true });
     await waitFor(() => expect(ipc.clipboardActivate).toHaveBeenCalledWith(7, 'copy'));
+  });
+
+  it('Ctrl+Shift+Delete 打开清空确认，Enter 保留收藏', async () => {
+    vi.mocked(ipc.clipboardList).mockResolvedValue(listResult([item({ id: 3 })]));
+
+    render(<ClipboardPanel />);
+    await waitFor(() => expect(screen.getByText('示例文本')).toBeTruthy());
+
+    const input = screen.getByLabelText('搜索剪贴板');
+    fireEvent.keyDown(input, { key: 'Delete', ctrlKey: true, shiftKey: true });
+    expect(screen.getByRole('alertdialog')).toBeTruthy();
+
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(ipc.clipboardClear).toHaveBeenCalledWith(false));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
   });
 });

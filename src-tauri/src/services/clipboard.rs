@@ -4,15 +4,17 @@
 // 入库成功发送 `clipboard://changed`（节流 500ms），失败发送 `clipboard://insert-error`（不节流）。
 
 use crate::error::AppError;
+use crate::models::Settings;
 use crate::platform::clipboard::{
     get_sequence_number, read_clipboard_content, ClipboardContent, ClipboardEntry,
 };
 use crate::platform::focus::capture_foreground;
+use crate::services::retention::RetentionPolicy;
 use crate::services::storage::{content_hash, ClipboardStorage};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
 /// 事件节流窗口
@@ -260,8 +262,12 @@ impl ClipboardMonitor {
             // 设置每 2s 从库里重新加载，兼顾实时性与开销
             let mut settings = storage.load_settings();
             let mut settings_checked = Instant::now();
+            // 清理时机：启动 + 每 6h + 每累计 200 次写入
+            let mut writes_since_cleanup = 0u32;
 
             log::info!("clipboard monitor started");
+            run_cleanup(&mut storage, &settings, &app);
+            let mut last_cleanup = Instant::now();
 
             while !stop_clone.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(250));
@@ -273,6 +279,14 @@ impl ClipboardMonitor {
                 if settings_checked.elapsed() >= Duration::from_secs(2) {
                     settings = storage.load_settings();
                     settings_checked = Instant::now();
+                }
+
+                if last_cleanup.elapsed()
+                    >= Duration::from_secs(crate::services::retention::CLEANUP_INTERVAL_SECS)
+                {
+                    run_cleanup(&mut storage, &settings, &app);
+                    last_cleanup = Instant::now();
+                    writes_since_cleanup = 0;
                 }
 
                 // 暂停记录：持久化开关或进程内定时/永久暂停
@@ -357,6 +371,15 @@ impl ClipboardMonitor {
                             entry.content.kind(),
                             outcome.is_new()
                         );
+
+                        writes_since_cleanup += 1;
+                        if writes_since_cleanup
+                            >= crate::services::retention::CLEANUP_WRITE_THRESHOLD
+                        {
+                            run_cleanup(&mut storage, &settings, &app);
+                            last_cleanup = Instant::now();
+                            writes_since_cleanup = 0;
+                        }
                     }
                     Err(e) => {
                         // 入库失败：立即通知 UI（不节流），载荷为 AppError 的 { code, message }
@@ -419,6 +442,27 @@ fn read_with_retry(stop_flag: &AtomicBool) -> Option<ClipboardEntry> {
 
     log::warn!("clipboard busy after retries, skipped");
     None
+}
+
+/// 执行一次清理；删除条目后通知前端刷新
+fn run_cleanup(storage: &mut ClipboardStorage, settings: &Settings, app: &AppHandle) {
+    let policy = RetentionPolicy::from_settings(settings);
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    match storage.cleanup(&policy, now_ms) {
+        Ok(report) => {
+            if report.deleted_items > 0 {
+                let payload = serde_json::json!({ "items": report.deleted_items });
+                if let Err(e) = app.emit("clipboard://cleaned", payload) {
+                    log::warn!("emit clipboard://cleaned failed: {}", e);
+                }
+            }
+        }
+        Err(e) => log::warn!("clipboard cleanup failed: {}", e),
+    }
 }
 
 /// 媒体类型开关：判断该内容类型是否允许入库

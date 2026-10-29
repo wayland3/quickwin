@@ -44,6 +44,7 @@ export function ClipboardPanel() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<ClipboardDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const stateRef = useRef({ query, filter });
@@ -154,6 +155,22 @@ export function ClipboardPanel() {
     [showHint],
   );
 
+  /** 清空历史：`includePinned=true` 连收藏一起清 */
+  const clearHistory = useCallback(
+    (includePinned: boolean) => {
+      ipc
+        .clipboardClear(includePinned)
+        .then(() => {
+          setConfirmClear(false);
+          setSelectedId(null);
+          void fetchAll(PAGE_SIZE, null);
+          inputRef.current?.focus();
+        })
+        .catch((err) => setError(errorMessage(err)));
+    },
+    [fetchAll],
+  );
+
   /** 滚到底部时追加下一页 */
   const loadMore = useCallback(async () => {
     if (moreLoadingRef.current) return;
@@ -244,8 +261,13 @@ export function ClipboardPanel() {
       const loaded = Math.max(PAGE_SIZE, itemsRef.current.length);
       void fetchAll(loaded);
     });
+    // 清理策略删除条目后刷新列表
+    const unlistenCleaned = listen('clipboard://cleaned', () => {
+      void fetchAll(PAGE_SIZE, null);
+    });
     return () => {
       unlisten.then((off) => off());
+      unlistenCleaned.then((off) => off());
     };
   }, [fetchAll]);
 
@@ -297,6 +319,17 @@ export function ClipboardPanel() {
     if (action === 'none') return;
     event.preventDefault();
 
+    // 清空确认态：Enter 保留收藏，Ctrl+Enter 全部清空，Esc 取消
+    if (confirmClear) {
+      if (action === 'escape') {
+        setConfirmClear(false);
+        inputRef.current?.focus();
+      } else if (action === 'paste' || action === 'copy') {
+        clearHistory(action === 'copy');
+      }
+      return;
+    }
+
     const currentIndex = items.findIndex((item) => item.id === selectedId);
     const current = currentIndex >= 0 ? items[currentIndex] : null;
 
@@ -338,6 +371,9 @@ export function ClipboardPanel() {
           .catch((err) => setError(errorMessage(err)));
         break;
       }
+      case 'clear':
+        setConfirmClear(true);
+        break;
       case 'paste':
         if (!current) break;
         ipc.clipboardActivate(current.id, 'paste').catch((err) => {
@@ -438,6 +474,46 @@ export function ClipboardPanel() {
 
         <PreviewPane detail={detail} loading={detailLoading} />
       </div>
+
+      {confirmClear && (
+        <div
+          role="alertdialog"
+          aria-label="清空历史确认"
+          className="flex items-center gap-3 border-t border-slate-700 px-3 py-2 text-xs text-slate-200"
+        >
+          <span>清空历史？</span>
+          <button
+            type="button"
+            tabIndex={-1}
+            className="rounded bg-slate-700 px-2 py-1"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => clearHistory(false)}
+          >
+            保留收藏（Enter）
+          </button>
+          <button
+            type="button"
+            tabIndex={-1}
+            className="rounded bg-red-600 px-2 py-1 text-white"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => clearHistory(true)}
+          >
+            全部清空（Ctrl+Enter）
+          </button>
+          <button
+            type="button"
+            tabIndex={-1}
+            className="rounded px-2 py-1 text-slate-400"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => {
+              setConfirmClear(false);
+              inputRef.current?.focus();
+            }}
+          >
+            取消（Esc）
+          </button>
+        </div>
+      )}
 
       <KeyHint hint={hint} total={total} error={error} />
     </section>

@@ -178,6 +178,7 @@ export type ClipboardAction =
   | 'pin'
   | 'delete'
   | 'hard-delete'
+  | 'clear'
   | 'filter-next'
   | 'filter-prev'
   | 'escape'
@@ -209,6 +210,7 @@ export function mapClipboardKey(input: KeyInput): ClipboardAction {
   }
 
   if (input.key === 'Delete') {
+    if (input.ctrlKey && input.shiftKey) return 'clear';
     return input.shiftKey ? 'hard-delete' : 'delete';
   }
 

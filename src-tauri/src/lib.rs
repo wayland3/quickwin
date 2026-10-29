@@ -56,6 +56,7 @@ pub fn run() {
             commands::clipboard::clipboard_get,
             commands::clipboard::clipboard_set_pinned,
             commands::clipboard::clipboard_delete,
+            commands::clipboard::clipboard_clear,
             commands::clipboard::clipboard_activate,
             commands::clipboard::clipboard_set_restore_after_paste,
             commands::settings::settings_get,

@@ -112,6 +112,10 @@ export const ipc = {
     return invokeWrapper<void>('clipboard_delete', { id, hard });
   },
 
+  async clipboardClear(includePinned: boolean): Promise<void> {
+    return invokeWrapper<void>('clipboard_clear', { includePinned });
+  },
+
   async clipboardActivate(id: number, mode: 'paste' | 'copy'): Promise<void> {
     return invokeWrapper<void>('clipboard_activate', { id, mode });
   },

@@ -148,6 +148,7 @@ Enter 替换原文 · Ctrl+Enter 仅复制 · 1–9 直选
 | 剪贴板 | `Ctrl+Enter` | 仅复制 |
 | 剪贴板 | `Ctrl+P` | 置顶切换 |
 | 剪贴板 | `Delete` / `Shift+Delete` | 删除 / 永久删除 |
+| 剪贴板 | `Ctrl+Shift+Delete` | 打开清空历史确认（`Enter` 保留收藏，`Ctrl+Enter` 全部清空，`Esc` 取消） |
 | 剪贴板 | `Tab` / `Shift+Tab` | 切换类型过滤 |
 | 转换 | `↑` `↓` | 移动动作 |
 | 转换 | `Enter` | 替换原文 |

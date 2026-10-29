@@ -289,6 +289,7 @@ Rust 侧 `snake_case`，前端调用同名。所有返回统一 `Result<T, AppEr
 | `overlay://hidden` | — | 隐藏后 |
 | `clipboard://changed` | `{ id, kind }` | 新条目入库或重复条目刷新（节流 500ms） |
 | `clipboard://insert-error` | `{ code, message }` | 入库失败（不节流，前端提示后不崩） |
+| `clipboard://cleaned` | `{ items }` | 保留策略清理或清空历史后（触发列表刷新；`items=-1` 表示主动清空） |
 | `clipboard://stats` | `{ count, blob_bytes }` | 清理/删除后 |
 | `hotkey://failed` | `{ action, accelerator, code }` | 注册失败 |
 | `settings://changed` | `{ keys: string[] }` | 设置变更 |

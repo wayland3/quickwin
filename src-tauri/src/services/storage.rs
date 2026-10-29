@@ -104,6 +104,24 @@ impl InsertOutcome {
     }
 }
 
+/// 清理结果
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CleanupReport {
+    /// 删除的条目数
+    pub deleted_items: usize,
+    /// 删除的 blob 文件数
+    pub deleted_blobs: usize,
+    /// 回收的孤儿 blob 数
+    pub reclaimed_orphans: usize,
+}
+
+/// 清空历史结果
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ClearReport {
+    pub deleted_items: usize,
+    pub deleted_blobs: usize,
+}
+
 /// 数据库路径（只读配置，供 command 层按需开短连接）
 #[derive(Debug, Clone)]
 pub struct DbPath(PathBuf);
@@ -588,6 +606,320 @@ impl ClipboardStorage {
 
         log::debug!("clipboard item deleted: id={}, hard={}", id, hard);
         Ok(())
+    }
+
+    /// 按保留策略清理：TTL → 条数上限 → blob 预算（置顶全部豁免）
+    ///
+    /// 删除主表 + FTS + blob 文件；返回删除数量。清理后回收超过 1 小时的孤儿 blob。
+    pub fn cleanup(
+        &mut self,
+        policy: &crate::services::retention::RetentionPolicy,
+        now_ms: i64,
+    ) -> Result<CleanupReport, AppError> {
+        let mut report = CleanupReport::default();
+
+        // 1) TTL 过期（按 last_copied_at）
+        let mut ids: Vec<i64> = Vec::new();
+        if let Some(cutoff) = policy.ttl_cutoff(now_ms) {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id FROM clipboard_item WHERE pinned = 0 AND last_copied_at < ?1")
+                .map_err(|e| AppError::Storage(format!("prepare ttl query: {}", e)))?;
+            let rows = stmt
+                .query_map(params![cutoff], |row| row.get::<_, i64>(0))
+                .map_err(|e| AppError::Storage(format!("run ttl query: {}", e)))?;
+            for row in rows {
+                ids.push(row.map_err(|e| AppError::Storage(format!("read ttl id: {}", e)))?);
+            }
+        }
+
+        // 2) 条数上限（只淘汰非置顶，最久未使用优先）
+        let total = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM clipboard_item", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(|e| AppError::Storage(format!("count items: {}", e)))?;
+        let excess = policy.excess_items(total);
+        if excess > 0 {
+            let mut stmt = self
+                .conn
+                .prepare(&format!(
+                    "SELECT id FROM clipboard_item WHERE pinned = 0 \
+                     ORDER BY last_copied_at ASC, id ASC LIMIT {}",
+                    excess
+                ))
+                .map_err(|e| AppError::Storage(format!("prepare excess query: {}", e)))?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, i64>(0))
+                .map_err(|e| AppError::Storage(format!("run excess query: {}", e)))?;
+            for row in rows {
+                ids.push(row.map_err(|e| AppError::Storage(format!("read excess id: {}", e)))?);
+            }
+        }
+
+        ids.sort_unstable();
+        ids.dedup();
+        if !ids.is_empty() {
+            let blobs = self.delete_ids(&ids)?;
+            report.deleted_items = ids.len();
+            report.deleted_blobs = blobs.len();
+            self.remove_blob_files(&blobs);
+        }
+
+        // 3) blob 总预算（超限时淘汰最旧的非置顶图片条目）
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, byte_size, blob_path FROM clipboard_item \
+                 WHERE pinned = 0 AND kind = 'image' AND blob_path IS NOT NULL \
+                 ORDER BY last_copied_at ASC, id ASC",
+            )
+            .map_err(|e| AppError::Storage(format!("prepare blob query: {}", e)))?;
+        let blob_rows: Vec<(i64, i64, String)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| AppError::Storage(format!("run blob query: {}", e)))?
+            .filter_map(Result::ok)
+            .collect();
+        drop(stmt);
+
+        // 按磁盘实际占用判定（包含孤儿文件），与验收「把 blob 目录塞到超限」一致
+        let mut remaining = self.blob_usage_on_disk()?;
+        if remaining > policy.blob_budget {
+            let mut overflow: Vec<i64> = Vec::new();
+            for (id, size, _) in &blob_rows {
+                if remaining <= policy.blob_budget {
+                    break;
+                }
+                overflow.push(*id);
+                remaining = (remaining - *size).max(0);
+            }
+            if !overflow.is_empty() {
+                let blobs = self.delete_ids(&overflow)?;
+                report.deleted_items += overflow.len();
+                report.deleted_blobs += blobs.len();
+                self.remove_blob_files(&blobs);
+            }
+        }
+
+        // 4) 孤儿 blob 回收（仅删除 1 小时前创建的）
+        report.reclaimed_orphans = self.reclaim_orphan_blobs(now_ms)?;
+
+        log::info!(
+            "clipboard cleanup: items={}, blobs={}, orphans={}",
+            report.deleted_items,
+            report.deleted_blobs,
+            report.reclaimed_orphans
+        );
+        Ok(report)
+    }
+
+    /// 清空历史：`include_pinned=false` 保留收藏（置顶）项
+    pub fn clear_history(&mut self, include_pinned: bool) -> Result<ClearReport, AppError> {
+        let mut report = ClearReport::default();
+
+        let mut stmt = self
+            .conn
+            .prepare(if include_pinned {
+                "SELECT id FROM clipboard_item"
+            } else {
+                "SELECT id FROM clipboard_item WHERE pinned = 0"
+            })
+            .map_err(|e| AppError::Storage(format!("prepare clear query: {}", e)))?;
+        let ids: Vec<i64> = stmt
+            .query_map([], |row| row.get::<_, i64>(0))
+            .map_err(|e| AppError::Storage(format!("run clear query: {}", e)))?
+            .filter_map(Result::ok)
+            .collect();
+        drop(stmt);
+
+        if !ids.is_empty() {
+            let blobs = self.delete_ids(&ids)?;
+            report.deleted_items = ids.len();
+            report.deleted_blobs = blobs.len();
+            self.remove_blob_files(&blobs);
+        }
+
+        // FTS 与主表行数对齐（防御性 rebuild，避免残留行）
+        self.check_fts_consistency()?;
+
+        // 全部清空后 blobs/ 不应有残留（含孤儿文件）
+        if include_pinned {
+            let blobs_dir = self.data_dir.join("blobs");
+            if blobs_dir.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&blobs_dir) {
+                    log::warn!("failed to remove blobs dir: {}", e);
+                }
+            }
+        }
+
+        log::info!(
+            "clipboard cleared: items={}, blobs={}, include_pinned={}",
+            report.deleted_items,
+            report.deleted_blobs,
+            include_pinned
+        );
+        Ok(report)
+    }
+
+    /// blobs 目录实际磁盘占用（字节），包含孤儿文件
+    fn blob_usage_on_disk(&self) -> Result<i64, AppError> {
+        let blobs_dir = self.data_dir.join("blobs");
+        if !blobs_dir.exists() {
+            return Ok(0);
+        }
+
+        let mut total = 0i64;
+        for shard in std::fs::read_dir(&blobs_dir)
+            .map_err(|e| AppError::Storage(format!("read blobs dir: {}", e)))?
+            .filter_map(Result::ok)
+        {
+            let shard_path = shard.path();
+            if !shard_path.is_dir() {
+                if let Ok(meta) = shard.metadata() {
+                    total += meta.len() as i64;
+                }
+                continue;
+            }
+            for entry in std::fs::read_dir(&shard_path)
+                .map_err(|e| AppError::Storage(format!("read shard dir: {}", e)))?
+                .filter_map(Result::ok)
+            {
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_file() {
+                        total += meta.len() as i64;
+                    }
+                }
+            }
+        }
+        Ok(total)
+    }
+
+    /// 回收孤儿 blob：不在 `blob_path` 引用中且修改时间超过 `ORPHAN_MIN_AGE_MS`
+    pub fn reclaim_orphan_blobs(&self, now_ms: i64) -> Result<usize, AppError> {
+        let mut referenced = std::collections::HashSet::new();
+        let mut stmt = self
+            .conn
+            .prepare("SELECT blob_path FROM clipboard_item WHERE blob_path IS NOT NULL")
+            .map_err(|e| AppError::Storage(format!("prepare blob paths: {}", e)))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| AppError::Storage(format!("run blob paths: {}", e)))?;
+        for row in rows.flatten() {
+            referenced.insert(row.replace('\\', "/"));
+        }
+        drop(stmt);
+
+        let mut removed = 0usize;
+        let blobs_dir = self.data_dir.join("blobs");
+        if !blobs_dir.exists() {
+            return Ok(0);
+        }
+
+        for shard in std::fs::read_dir(&blobs_dir)
+            .map_err(|e| AppError::Storage(format!("read blobs dir: {}", e)))?
+            .filter_map(Result::ok)
+        {
+            let shard_path = shard.path();
+            if !shard_path.is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&shard_path)
+                .map_err(|e| AppError::Storage(format!("read shard dir: {}", e)))?
+                .filter_map(Result::ok)
+            {
+                let file_path = entry.path();
+                if !file_path.is_file() {
+                    continue;
+                }
+                let relative = file_path
+                    .strip_prefix(&self.data_dir)
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                if referenced.contains(&relative) {
+                    continue;
+                }
+
+                let age_ok = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| {
+                        now_ms - d.as_millis() as i64
+                            >= crate::services::retention::ORPHAN_MIN_AGE_MS
+                    })
+                    .unwrap_or(false);
+                if age_ok {
+                    match std::fs::remove_file(&file_path) {
+                        Ok(()) => removed += 1,
+                        Err(e) => log::warn!("failed to remove orphan blob: {}", e),
+                    }
+                }
+            }
+        }
+
+        Ok(removed)
+    }
+
+    /// 事务内按 id 删除主表与 FTS，返回被删条目的 blob 相对路径
+    fn delete_ids(&mut self, ids: &[i64]) -> Result<Vec<String>, AppError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| AppError::Storage(format!("begin cleanup tx: {}", e)))?;
+
+        let mut blobs = Vec::new();
+        {
+            let mut stmt = tx
+                .prepare("SELECT blob_path FROM clipboard_item WHERE id = ?1")
+                .map_err(|e| AppError::Storage(format!("prepare blob lookup: {}", e)))?;
+            for id in ids {
+                let blob: Option<Option<String>> = stmt
+                    .query_row(params![id], |row| row.get::<_, Option<String>>(0))
+                    .optional()
+                    .map_err(|e| AppError::Storage(format!("query blob: {}", e)))?;
+                if let Some(Some(path)) = blob {
+                    blobs.push(path);
+                }
+            }
+        }
+
+        {
+            let mut fts = tx
+                .prepare("DELETE FROM clipboard_fts WHERE rowid = ?1")
+                .map_err(|e| AppError::Storage(format!("prepare fts delete: {}", e)))?;
+            let mut items = tx
+                .prepare("DELETE FROM clipboard_item WHERE id = ?1")
+                .map_err(|e| AppError::Storage(format!("prepare item delete: {}", e)))?;
+            for id in ids {
+                fts.execute(params![id])
+                    .map_err(|e| AppError::Storage(format!("delete fts: {}", e)))?;
+                items
+                    .execute(params![id])
+                    .map_err(|e| AppError::Storage(format!("delete item: {}", e)))?;
+            }
+        }
+
+        tx.commit()
+            .map_err(|e| AppError::Storage(format!("commit cleanup: {}", e)))?;
+        Ok(blobs)
+    }
+
+    /// 删除 blob 文件（失败只记日志，不影响 DB 结果）
+    fn remove_blob_files(&self, blobs: &[String]) {
+        for relative in blobs {
+            let absolute = self.data_dir.join(relative);
+            if let Err(e) = std::fs::remove_file(&absolute) {
+                log::warn!("failed to remove blob file: {}", e);
+            }
+        }
     }
 
     /// 打开可写连接（业务写命令用）：跳过启动期 FTS 一致性全表计数
@@ -1904,5 +2236,355 @@ mod tests {
         let loaded = storage.load_settings();
         assert_eq!(loaded.max_items, 5000);
         assert_eq!(loaded.theme, "dark");
+    }
+
+    fn image_entry_bytes(data: Vec<u8>) -> ClipboardEntry {
+        ClipboardEntry {
+            content: ClipboardContent::Image {
+                data,
+                format: ImageFormat::Png,
+            },
+            preview: "[图片]".to_string(),
+            truncated: false,
+            source_app: None,
+            source_title: None,
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TTL过期清理且置顶豁免() {
+        let mut storage = open_test_storage();
+        let day = 24 * 60 * 60 * 1000i64;
+
+        let old = match storage.insert(&text_entry("过期条目")) {
+            Ok(o) => o,
+            Err(e) => panic!("insert failed: {}", e),
+        };
+        let pinned = match storage.insert(&text_entry("过期但置顶")) {
+            Ok(o) => o,
+            Err(e) => panic!("insert failed: {}", e),
+        };
+        let fresh = match storage.insert(&text_entry("最近条目")) {
+            Ok(o) => o,
+            Err(e) => panic!("insert failed: {}", e),
+        };
+
+        set_time(&storage, old.id(), day);
+        set_time(&storage, pinned.id(), day);
+        set_time(&storage, fresh.id(), 20 * day);
+        if let Err(e) = storage.set_pinned(pinned.id(), true) {
+            panic!("set_pinned failed: {}", e);
+        }
+
+        let policy = crate::services::retention::RetentionPolicy {
+            ttl_days: 15,
+            max_items: 10_000,
+            blob_budget: crate::services::retention::BLOB_BUDGET_BYTES,
+        };
+        match storage.cleanup(&policy, 20 * day) {
+            Ok(report) => assert_eq!(report.deleted_items, 1),
+            Err(e) => panic!("cleanup failed: {:?}", e),
+        }
+
+        let ids = list_ids(&storage, "", ClipFilter::All);
+        assert!(!ids.contains(&old.id()));
+        assert!(ids.contains(&pinned.id()));
+        assert!(ids.contains(&fresh.id()));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 超过条数上限淘汰最旧且置顶豁免() {
+        let mut storage = open_test_storage();
+        let mut inserted = Vec::new();
+        for index in 0..12 {
+            let outcome = match storage.insert(&text_entry(&format!("条数条目{}", index))) {
+                Ok(o) => o,
+                Err(e) => panic!("insert failed: {}", e),
+            };
+            set_time(&storage, outcome.id(), i64::from(index) + 1);
+            inserted.push(outcome.id());
+        }
+        // 置顶最旧项，验证不被淘汰
+        if let Err(e) = storage.set_pinned(inserted[0], true) {
+            panic!("set_pinned failed: {}", e);
+        }
+
+        let policy = crate::services::retention::RetentionPolicy {
+            ttl_days: -1,
+            max_items: 10,
+            blob_budget: crate::services::retention::BLOB_BUDGET_BYTES,
+        };
+        match storage.cleanup(&policy, 1_000_000) {
+            Ok(report) => assert_eq!(report.deleted_items, 2),
+            Err(e) => panic!("cleanup failed: {:?}", e),
+        }
+
+        let ids = list_ids(&storage, "", ClipFilter::All);
+        assert_eq!(ids.len(), 10);
+        assert!(ids.contains(&inserted[0]));
+        assert!(!ids.contains(&inserted[1]));
+        assert!(!ids.contains(&inserted[2]));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn blob超预算淘汰最旧图片并删文件() {
+        let unique = format!(
+            "quickwin-blob-budget-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let db_path = std::env::temp_dir().join(unique).join("quickwin.db");
+        let mut storage = match ClipboardStorage::open_at(&db_path) {
+            Ok(s) => s,
+            Err(e) => panic!("open failed: {}", e),
+        };
+
+        let mut blobs = Vec::new();
+        for index in 0..3u8 {
+            let data = vec![index; 100];
+            let outcome = match storage.insert(&image_entry_bytes(data)) {
+                Ok(o) => o,
+                Err(e) => panic!("insert failed: {}", e),
+            };
+            set_time(&storage, outcome.id(), i64::from(index) + 1);
+            blobs.push(outcome.id());
+        }
+
+        let policy = crate::services::retention::RetentionPolicy {
+            ttl_days: -1,
+            max_items: 10_000,
+            blob_budget: 200,
+        };
+        match storage.cleanup(&policy, 1_000_000) {
+            Ok(report) => {
+                assert_eq!(report.deleted_items, 1);
+                assert_eq!(report.deleted_blobs, 1);
+            }
+            Err(e) => panic!("cleanup failed: {:?}", e),
+        }
+
+        let stored: Vec<String> = {
+            let mut stmt = match storage
+                .conn
+                .prepare("SELECT blob_path FROM clipboard_item WHERE blob_path IS NOT NULL")
+            {
+                Ok(stmt) => stmt,
+                Err(e) => panic!("prepare failed: {}", e),
+            };
+            let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
+                Ok(rows) => rows,
+                Err(e) => panic!("query failed: {}", e),
+            };
+            rows.filter_map(Result::ok).collect()
+        };
+        assert_eq!(stored.len(), 2);
+        for relative in &stored {
+            assert!(storage.data_dir.join(relative).exists());
+        }
+
+        if let Some(dir) = db_path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 清空历史可保留收藏() {
+        let mut storage = open_test_storage();
+        let plain = match storage.insert(&text_entry("普通条目")) {
+            Ok(o) => o,
+            Err(e) => panic!("insert failed: {}", e),
+        };
+        let pinned = match storage.insert(&text_entry("收藏条目")) {
+            Ok(o) => o,
+            Err(e) => panic!("insert failed: {}", e),
+        };
+        if let Err(e) = storage.set_pinned(pinned.id(), true) {
+            panic!("set_pinned failed: {}", e);
+        }
+
+        match storage.clear_history(false) {
+            Ok(report) => assert_eq!(report.deleted_items, 1),
+            Err(e) => panic!("clear failed: {:?}", e),
+        }
+        assert_eq!(count_items(&storage), 1);
+        assert!(list_ids(&storage, "", ClipFilter::Favorites).contains(&pinned.id()));
+
+        match storage.clear_history(true) {
+            Ok(report) => assert_eq!(report.deleted_items, 1),
+            Err(e) => panic!("clear all failed: {}", e),
+        }
+        assert_eq!(count_items(&storage), 0);
+        let fts_rows: i64 =
+            match storage
+                .conn
+                .query_row("SELECT COUNT(*) FROM clipboard_fts", [], |row| row.get(0))
+            {
+                Ok(count) => count,
+                Err(e) => panic!("count fts failed: {}", e),
+            };
+        assert_eq!(fts_rows, 0);
+        assert!(!list_ids(&storage, "", ClipFilter::All).contains(&plain.id()));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 孤儿blob只回收过期文件() {
+        let unique = format!(
+            "quickwin-orphan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let db_path = std::env::temp_dir().join(unique).join("quickwin.db");
+        let mut storage = match ClipboardStorage::open_at(&db_path) {
+            Ok(s) => s,
+            Err(e) => panic!("open failed: {}", e),
+        };
+
+        let outcome = match storage.insert(&image_entry_bytes(vec![1, 2, 3])) {
+            Ok(o) => o,
+            Err(e) => panic!("insert failed: {}", e),
+        };
+        let referenced: Option<String> = match storage.conn.query_row(
+            "SELECT blob_path FROM clipboard_item WHERE id = ?1",
+            params![outcome.id()],
+            |row| row.get(0),
+        ) {
+            Ok(path) => path,
+            Err(e) => panic!("query blob failed: {}", e),
+        };
+        let referenced = match referenced {
+            Some(path) => path,
+            None => panic!("image should have blob"),
+        };
+
+        let orphan_dir = storage.data_dir.join("blobs").join("zz");
+        if let Err(e) = std::fs::create_dir_all(&orphan_dir) {
+            panic!("create orphan dir failed: {}", e);
+        }
+        let orphan = orphan_dir.join("orphan.png");
+        if let Err(e) = std::fs::write(&orphan, [0u8; 4]) {
+            panic!("write orphan failed: {}", e);
+        }
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+            + 2 * 60 * 60 * 1000;
+        match storage.reclaim_orphan_blobs(now_ms) {
+            Ok(removed) => assert_eq!(removed, 1),
+            Err(e) => panic!("reclaim failed: {}", e),
+        }
+        assert!(!orphan.exists());
+        assert!(storage.data_dir.join(&referenced).exists());
+
+        if let Some(dir) = db_path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn blob预算按磁盘实际占用判定() {
+        let unique = format!(
+            "quickwin-blob-disk-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let db_path = std::env::temp_dir().join(unique).join("quickwin.db");
+        let mut storage = match ClipboardStorage::open_at(&db_path) {
+            Ok(s) => s,
+            Err(e) => panic!("open failed: {}", e),
+        };
+
+        let outcome = match storage.insert(&image_entry_bytes(vec![9u8; 100])) {
+            Ok(o) => o,
+            Err(e) => panic!("insert failed: {}", e),
+        };
+        set_time(&storage, outcome.id(), 1);
+        let blob_path: String = match storage.conn.query_row(
+            "SELECT blob_path FROM clipboard_item WHERE id = ?1",
+            params![outcome.id()],
+            |row| row.get(0),
+        ) {
+            Ok(path) => path,
+            Err(e) => panic!("query blob failed: {}", e),
+        };
+
+        // 额外写入 300 字节孤儿文件，使磁盘占用超过预算
+        let orphan_dir = storage.data_dir.join("blobs").join("zz");
+        if let Err(e) = std::fs::create_dir_all(&orphan_dir) {
+            panic!("create orphan dir failed: {}", e);
+        }
+        if let Err(e) = std::fs::write(orphan_dir.join("new-orphan.png"), [7u8; 300]) {
+            panic!("write orphan failed: {}", e);
+        }
+
+        let policy = crate::services::retention::RetentionPolicy {
+            ttl_days: -1,
+            max_items: 10_000,
+            blob_budget: 200,
+        };
+        match storage.cleanup(&policy, 1_000_000) {
+            Ok(report) => {
+                assert_eq!(report.deleted_items, 1);
+                assert_eq!(report.deleted_blobs, 1);
+            }
+            Err(e) => panic!("cleanup failed: {:?}", e),
+        }
+
+        assert!(!storage.data_dir.join(&blob_path).exists());
+
+        if let Some(dir) = db_path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 全部清空后blobs目录为空() {
+        let unique = format!(
+            "quickwin-clear-blobs-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let db_path = std::env::temp_dir().join(unique).join("quickwin.db");
+        let mut storage = match ClipboardStorage::open_at(&db_path) {
+            Ok(s) => s,
+            Err(e) => panic!("open failed: {}", e),
+        };
+
+        match storage.insert(&image_entry_bytes(vec![1, 2, 3])) {
+            Ok(_) => {}
+            Err(e) => panic!("insert failed: {}", e),
+        }
+        let blobs_dir = storage.data_dir.join("blobs");
+        assert!(blobs_dir.exists());
+
+        match storage.clear_history(true) {
+            Ok(report) => assert_eq!(report.deleted_items, 1),
+            Err(e) => panic!("clear failed: {:?}", e),
+        }
+        assert!(!blobs_dir.exists());
+
+        if let Some(dir) = db_path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }

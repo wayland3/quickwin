@@ -11,7 +11,7 @@ use crate::services::paste::PasteOptions;
 use crate::services::storage::{ClipboardStorage, DbPath};
 use crate::services::window::OverlayManager;
 use std::path::PathBuf;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 /// 从受管状态取数据库路径
 fn db_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, AppError> {
@@ -109,6 +109,23 @@ pub fn clipboard_set_restore_after_paste(
         .try_state::<PasteOptions>()
         .ok_or_else(|| AppError::Internal("paste options not configured".into()))?;
     options.set_restore_after_paste(enabled);
+    Ok(())
+}
+
+/// 清空历史（`include_pinned=false` 保留收藏）
+#[tauri::command]
+pub async fn clipboard_clear(app: tauri::AppHandle, include_pinned: bool) -> Result<(), AppError> {
+    let path = db_path(&app)?;
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), AppError> {
+        let mut storage = ClipboardStorage::open_write_at(&path)?;
+        storage.clear_history(include_pinned)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("clipboard_clear failed: {}", e)))??;
+
+    let _ = app.emit("clipboard://cleaned", serde_json::json!({ "items": -1 }));
     Ok(())
 }
 

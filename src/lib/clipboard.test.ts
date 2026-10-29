@@ -100,6 +100,7 @@ describe('键盘映射', () => {
     expect(key({ key: 'P', ctrlKey: true })).toBe('pin');
     expect(key({ key: 'Delete' })).toBe('delete');
     expect(key({ key: 'Delete', shiftKey: true })).toBe('hard-delete');
+    expect(key({ key: 'Delete', ctrlKey: true, shiftKey: true })).toBe('clear');
   });
 
   it('Tab 切换筛选', () => {
