@@ -6,10 +6,9 @@ use tauri::{
 };
 
 pub fn setup_tray(app: &AppHandle) -> Result<(), AppError> {
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .ok_or_else(|| AppError::Internal("default window icon missing".into()))?;
+    // 托盘使用独立图标（`icons/tray.png`）：透明背景的蓝色圆角块 + 白色闪电
+    let icon = tauri::image::Image::from_bytes(include_bytes!("../../icons/tray.png"))
+        .map_err(|error| AppError::Internal(format!("failed to load tray icon: {}", error)))?;
 
     let open_launcher = MenuItem::with_id(app, "open_launcher", "打开启动器", true, None::<&str>)?;
     let open_clipboard =
