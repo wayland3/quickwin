@@ -41,7 +41,7 @@ pub fn foreground_window() -> Result<WindowInfo, AppError>;
 unsafe { ShowWindow(hwnd, SW_SHOW) };
 ```
 
-5. **超时预算**：焦点恢复 150ms、剪贴板打开 5×20ms、取词 400ms。超过就降级，不无限重试。
+5. **超时预算**：焦点恢复 150ms、剪贴板打开 5×20ms。超过就降级，不无限重试。
 
 ## 模板：剪贴板写入（多格式）
 
@@ -139,7 +139,6 @@ emoji 是代理对，必须逐 `u16` 发送；不要按 `char` 发送。
 | 用物理坐标调 Tauri | 高 DPI 下位置偏移 | 除以目标显示器 `scale_factor` |
 | 忘记 `MOD_NOREPEAT` | 按住热键连续触发 | 注册时显式设置 |
 | 忽略 `CanIncludeInClipboardHistory` | 密码进历史 | 读取前先查敏感标记 |
-| 取词不还原剪贴板 | 用户剪贴板被覆盖 | 快照 + 还原 + 抑制监听 |
 | 把窗口标题写日志 | 隐私泄露 | 只记进程名与长度 |
 
 ## 验证要求
@@ -147,10 +146,9 @@ emoji 是代理对，必须逐 `u16` 发送；不要按 `char` 发送。
 1. `cargo clippy --all-targets -- -D warnings` 通过，无新增 `unwrap`。
 2. 按 `docs/WIN32-NOTES.md` 第 10 节跑**对应分组**，不是全跑；但至少覆盖：目标应用 3 个、管理员窗口 1 个、多屏/缩放 1 项。
 3. 记录环境：Windows 版本号、缩放比例、是否多屏、输入法状态。
-4. 失败场景要主动构造：剪贴板被占用、无选中文本、焦点窗口已关闭。
+4. 失败场景要主动构造：剪贴板被占用、焦点窗口已关闭。
 
 ## 升级路径（不要现在做）
 
 - 需要更低延迟 → 评估 `AddClipboardFormatListener`（ADR-0006 升级条件）。
-- 需要更强取词 → 先试 UI Automation `TextPattern`，失败再回退复制（ADR-0007）。
 - 需要双击修饰键 → 需要低级钩子，必须先写 ADR 并获得用户同意（ADR-0012 明确当前不做）。

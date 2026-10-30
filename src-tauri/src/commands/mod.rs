@@ -80,7 +80,6 @@ pub async fn hotkey_rebind(
     let action_enum = match action.as_str() {
         "launcher" => HotkeyAction::Launcher,
         "clipboard" => HotkeyAction::Clipboard,
-        "actions" => HotkeyAction::Actions,
         _ => return Err(AppError::Internal(format!("invalid action: {}", action))),
     };
 
@@ -105,7 +104,6 @@ pub async fn hotkey_rebind(
                         match action_clone.as_str() {
                             "launcher" => next.launcher_hotkey = accelerator_clone,
                             "clipboard" => next.clipboard_hotkey = accelerator_clone,
-                            "actions" => next.actions_hotkey = accelerator_clone,
                             _ => {}
                         }
                         Ok(next)
@@ -118,4 +116,26 @@ pub async fn hotkey_rebind(
     }
 
     Ok(success)
+}
+
+#[tauri::command]
+pub async fn hotkey_suspend(app: tauri::AppHandle, action: String) -> Result<(), AppError> {
+    let hotkey_manager = app.state::<HotkeyManager>();
+    let action_enum = match action.as_str() {
+        "launcher" => HotkeyAction::Launcher,
+        "clipboard" => HotkeyAction::Clipboard,
+        _ => return Err(AppError::Internal(format!("invalid action: {}", action))),
+    };
+    hotkey_manager.suspend(action_enum)
+}
+
+#[tauri::command]
+pub async fn hotkey_resume(app: tauri::AppHandle, action: String) -> Result<(), AppError> {
+    let hotkey_manager = app.state::<HotkeyManager>();
+    let action_enum = match action.as_str() {
+        "launcher" => HotkeyAction::Launcher,
+        "clipboard" => HotkeyAction::Clipboard,
+        _ => return Err(AppError::Internal(format!("invalid action: {}", action))),
+    };
+    hotkey_manager.resume(action_enum)
 }

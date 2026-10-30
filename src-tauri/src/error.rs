@@ -12,9 +12,6 @@ pub enum AppError {
     #[error("目标窗口权限较高，无法自动操作")]
     ElevatedTarget,
 
-    #[error("未检测到选中文本")]
-    NoSelection,
-
     #[error("内容过长（超过 256KB）")]
     TooLarge,
 
@@ -29,6 +26,9 @@ pub enum AppError {
 
     #[error("设置值不合法")]
     SettingsInvalid(String),
+
+    #[error("{0}")]
+    LaunchFailed(String),
 
     #[error("发生内部错误，请查看日志")]
     Internal(String),
@@ -55,7 +55,6 @@ impl Serialize for AppError {
             AppError::ClipboardBusy => ("clipboard.busy", self.to_string()),
             AppError::ClipboardRead => ("clipboard.read_failed", self.to_string()),
             AppError::ElevatedTarget => ("focus.elevated_target", self.to_string()),
-            AppError::NoSelection => ("selection.empty", self.to_string()),
             AppError::TooLarge => ("content.too_large", self.to_string()),
             AppError::HotkeyConflict(key) => {
                 ("hotkey.conflict", format!("热键 {} 已被其他程序占用", key))
@@ -65,6 +64,7 @@ impl Serialize for AppError {
             AppError::SettingsInvalid(reason) => {
                 ("settings.invalid", format!("设置不合法：{}", reason))
             }
+            AppError::LaunchFailed(reason) => ("launcher.launch_failed", reason.clone()),
             AppError::Internal(_) => ("internal", self.to_string()),
         };
 

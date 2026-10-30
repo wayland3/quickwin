@@ -1140,6 +1140,39 @@ impl ClipboardStorage {
         Ok(out)
     }
 
+    /// 按 key 读取单条应用索引行（启动器执行用）
+    pub fn load_app(&self, key: &str) -> Result<Option<AppIndexRow>, AppError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT key, name, target, args, kind, source, icon_path FROM app_index WHERE key = ?1",
+            )
+            .map_err(|e| AppError::Storage(format!("failed to prepare app lookup: {}", e)))?;
+
+        let mut rows = stmt
+            .query_map(params![key.to_lowercase()], |row| {
+                Ok(AppIndexRow {
+                    key: row.get(0)?,
+                    name: row.get(1)?,
+                    target: row.get(2)?,
+                    args: row.get(3)?,
+                    kind: row.get(4)?,
+                    source: row.get(5)?,
+                    icon_path: row.get(6)?,
+                })
+            })
+            .map_err(|e| AppError::Storage(format!("failed to query app lookup: {}", e)))?;
+
+        match rows.next() {
+            Some(row) => {
+                let row =
+                    row.map_err(|e| AppError::Storage(format!("failed to read app row: {}", e)))?;
+                Ok(Some(row))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// 打开可写连接（业务写命令用）：跳过启动期 FTS 一致性全表计数
     ///
     /// 一致性校验只在应用启动的监听线程初始化时执行一次；置顶/删除等高频路径不应
@@ -2474,6 +2507,26 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].key, "b.exe");
         assert_eq!(loaded[1].key, "c.exe");
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 按key读取单条应用且大小写不敏感() {
+        let mut storage = open_test_storage();
+        let rows = vec![app_row("a.exe", "Alpha"), app_row("b.exe", "Beta")];
+        storage
+            .replace_app_index(&rows, 1000)
+            .expect("seed app index");
+
+        let found = storage.load_app("A.EXE").expect("load app").expect("found");
+        assert_eq!(found.key, "a.exe");
+        assert_eq!(found.name, "Alpha");
+        assert_eq!(found.kind, "win32");
+
+        assert!(storage
+            .load_app("missing.exe")
+            .expect("load absent")
+            .is_none());
     }
 
     #[test]

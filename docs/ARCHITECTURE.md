@@ -4,7 +4,7 @@
 
 ```
 ┌──────────────────────────── WebView (React 19 + TS) ────────────────────────────┐
-│  Launcher  │  Clipboard  │  Actions  │  Settings                                │
+│  Launcher  │  Clipboard  │  Settings                                            │
 │                  lib/ipc.ts（唯一 invoke 入口）                                  │
 └───────────────────────────────────┬──────────────────────────────────────────────┘
                                     │ Tauri IPC (command / event)
@@ -12,14 +12,13 @@
 │ Tauri App (Rust)                                                                  │
 │  commands/    参数校验、编排、返回 models                                         │
 │  services/    storage · search · ranking · hotkey · config · tray · index         │
-│  actions/     detect · timestamp · base64 · hash（纯函数，无 IO）                  │
-│  platform/    input · clipboard · focus · apps · files（唯一 unsafe / Win32 出口） │
+│  platform/    input · clipboard · focus · apps（唯一 unsafe / Win32 出口）        │
 └──────────────┬───────────────────┬────────────────────┬──────────────────────────┘
                │                   │                    │
         SQLite (WAL)          blobs/ 文件            Win32 (windows crate)
 ```
 
-依赖方向严格单向：`commands → services → platform`，`services → actions`，`actions` 不依赖任何 IO 层。
+依赖方向严格单向：`commands → services → platform`。
 
 ## 2. 依赖清单
 
@@ -38,15 +37,9 @@
 | `windows` | Win32 API | 只用到的 feature 子集，见下 |
 | `rusqlite` | SQLite | feature `bundled`（自带 SQLite，FTS5 可用） |
 | `serde` / `serde_json` | 序列化 | — |
-| `chrono` / `chrono-tz` | 时间与时区 | 只做转换，不引入本地化依赖 |
-| `md-5` / `sha2` | 哈希 | 计算与去重共用 |
-| `base64` | Base64 | 标准 + URL-safe |
-| `regex` | 检测规则 | 预编译 `OnceLock` |
+| `sha2` | 哈希 | 剪贴板去重键 |
 | `thiserror` | 错误定义 | — |
-| `fuzzy-matcher` | 模糊匹配 | Skim 算法 |
-| `walkdir` | 文件索引 | 带排除规则 |
 | `winreg` | 注册表读取 | App Paths |
-| `uuid` | 标识 | 命令 ID 等 |
 
 `windows` crate 需要的 feature（按实际编译报错增补，不要全开）：
 `Win32_Foundation`、`Win32_UI_WindowsAndMessaging`、`Win32_UI_Input_KeyboardAndMouse`、`Win32_System_DataExchange`、`Win32_System_Memory`、`Win32_System_Threading`、`Win32_System_Registry`、`Win32_Graphics_Gdi`、`Win32_UI_Shell`、`Win32_System_Com`、`Win32_UI_Accessibility`（UWP 解析备用）。
@@ -65,7 +58,7 @@
 | Tokio runtime | `async` command | 禁止长时间持锁；阻塞调用走 `spawn_blocking` |
 | 剪贴板监听线程 | 250ms 序列号轮询 → 读取 → 发 channel | 独立 `std::thread`；读取期间不 `await`；失败重试后跳过 |
 | DB 写线程 | 独占写连接，串行执行写事务 | 通过 `mpsc` 收 `DbWrite`；定期 checkpoint |
-| 索引线程 | 应用/文件索引构建 | 低优先级；支持取消；分片提交事务 |
+| 索引线程 | 应用索引构建 | 低优先级；支持取消；分片提交事务 |
 | 热键回调 | 收到热键 → `app.emit` / 显示窗口 | 回调内不做重活，不做 IO |
 
 **原则：一个资源只归一个线程。** 剪贴板句柄只在监听线程或 `spawn_blocking` 内打开；SQLite 写连接只在 DB 线程存在。
@@ -80,7 +73,6 @@
 |---|---|---|
 | `launcher` | 启动器 | `Alt+Space` |
 | `clipboard` | 剪贴板历史 | `Alt+V` |
-| `actions` | 划词动作菜单 | `Alt+X` |
 
 这样做的理由：避免多窗口的焦点竞争与启动开销；高度是动态的，切换模式即切换尺寸。设置窗口独立，避免浮层失焦隐藏逻辑干扰。
 
@@ -102,7 +94,7 @@ PRAGMA user_version;  -- 迁移版本
 
 > **版本归属说明（ADR-0014，2026-10-29）**：v1 实际只包含下方 `clipboard_item` 与
 > `clipboard_fts`；v2 新增 `settings`；v3 新增 `app_index`（T-301）；v4 新增 `usage_stat`（T-303）。
-> `meta`、`file_index` 将随对应里程碑（M4 / M6）以独立 migration（v5+）落地，避免在未发布前
+> `meta` 将随对应里程碑（M6）以独立 migration（v5+）落地，避免在未发布前
 > 反复修改已发布迁移。下方 SQL 保留作为完整结构参考，不代表一次性建成。
 
 ```sql
@@ -161,23 +153,10 @@ CREATE TABLE app_index (
 );
 CREATE INDEX ix_app_name ON app_index(name);
 
--- 文件索引（兜底搜索用；Everything 命中时不写这里）
-CREATE TABLE file_index (
-  id     INTEGER PRIMARY KEY AUTOINCREMENT,
-  path   TEXT NOT NULL UNIQUE,
-  name   TEXT NOT NULL,
-  parent TEXT NOT NULL,
-  size   INTEGER,
-  mtime  INTEGER,
-  root   TEXT NOT NULL
-);
-CREATE INDEX ix_file_name  ON file_index(name);
-CREATE INDEX ix_file_mtime ON file_index(mtime DESC);
-
 -- 使用频率（frecency）
 CREATE TABLE usage_stat (
   item_key     TEXT PRIMARY KEY,
-  kind         TEXT NOT NULL,        -- app | command | file
+  kind         TEXT NOT NULL,        -- app | command
   use_count    INTEGER NOT NULL DEFAULT 0,
   last_used_at INTEGER NOT NULL
 );
@@ -261,8 +240,8 @@ Rust 侧 `snake_case`，前端调用同名。所有返回统一 `Result<T, AppEr
 | `overlay_show` | `{ mode }` | `()` | 显示并聚焦（内部用） |
 | `overlay_hide` | — | `()` | 隐藏并恢复焦点 |
 | `overlay_resize` | `{ height }` | `()` | 120–560 夹取 |
-| `launcher_query` | `{ query, limit }` | `{ items: LauncherItem[], hint? }` | 搜索应用/文件/命令 |
-| `launcher_execute` | `{ key, action }` | `()` | action: `open`/`admin`/`reveal`/`copy_path` |
+| `launcher_query` | `{ query, limit }` | `{ items: LauncherItem[], hint? }` | 搜索应用/命令 |
+| `launcher_execute` | `{ key }` | `()` | 打开应用并刷新 frecency |
 | `clipboard_list` | `{ query, filter, limit, offset }` | `{ items, total }` | 列表只返回 `preview`，不含全文 |
 | `clipboard_get` | `{ id }` | `ClipboardDetail` | 全文/图片路径/文件列表 |
 | `clipboard_activate` | `{ id, mode }` | `()` | mode: `paste`/`copy`；降级用 `app://toast` 提示 |
@@ -270,15 +249,11 @@ Rust 侧 `snake_case`，前端调用同名。所有返回统一 `Result<T, AppEr
 | `clipboard_delete` | `{ id, hard }` | `()` | hard 时立即删 blob |
 | `clipboard_clear` | `{ include_pinned }` | `()` | 二次确认在前端做 |
 | `clipboard_stats` | — | `{ count, pinned, blob_bytes, db_bytes }` | 设置页显示 |
-| `selection_capture` | `{ timeout_ms? }` | `SelectionContext` | 取词 + 检测结果 |
-| `selection_actions` | `{ text }` | `ActionOffer[]` | 不含 IO，可单测 |
-| `selection_apply` | `{ action_id, text, mode }` | `ApplyResult` | mode: `replace`/`copy` |
 | `settings_get` | — | `Settings` | — |
 | `settings_update` | `{ patch }` | `Settings` | 校验失败返回 `settings.invalid` |
 | `hotkey_status` | — | `{ bindings, failed }` | 设置页用 |
 | `hotkey_rebind` | `{ action, accelerator }` | `{ ok, conflict? }` | 先注册新键成功再释放旧键 |
 | `app_index_rebuild` | — | `{ count }` | 托盘/命令触发 |
-| `file_index_rebuild` | `{ roots }` | `{ count }` | 设置页触发 |
 | `diagnostics_export` | — | `{ path }` | 脱敏后导出，供反馈 |
 
 ### 6.2 事件
@@ -320,23 +295,9 @@ pub struct LauncherItem {
     pub key: String,
     pub title: String,
     pub subtitle: Option<String>,
-    pub kind: LauncherKind,       // app | file | command | web
+    pub kind: LauncherKind,       // app | file | command
     pub icon: Option<String>,     // 本地图标路径；前端用 asset 协议加载
     pub score: f32,
-}
-
-pub struct ActionOffer {
-    pub id: String,               // e.g. time.to_local
-    pub group: String,            // 时间 / 编码 / 哈希 / 文本
-    pub label: String,            // 中文
-    pub preview: String,          // 结果预览（≤2000 字，超出标记）
-    pub primary: bool,            // 默认选中
-}
-
-pub struct SelectionContext {
-    pub text: String,
-    pub kinds: Vec<DetectedKind>,
-    pub source_app: Option<String>,
 }
 ```
 
@@ -395,26 +356,22 @@ clipboard_activate(id, mode):
 
 顺序不能反：**先隐藏再恢复焦点**，否则焦点会被浮层抢回。
 
-### 7.4 取词
+### 7.4 打开应用
 
 ```
-selection_capture:
-  snapshot = clipboard.snapshot()       # 读取所有可还原格式
-  prev = focus.foreground()
-  input.send_ctrl_c()
-  for up to 400ms:
-      if clipboard.seq changed and text != snapshot.text: break
-      sleep 20ms
-  text = clipboard.read_text()
-  clipboard.restore(snapshot)           # 失败只记录告警
-  detect(text) → action offers
+launcher_execute(key):
+  row = app_index[key]                       # 先查索引，查不到直接报错
+  AllowSetForegroundWindow(ASFW_ANY)         # 浮层是前台，先给新进程授权
+  win32 | url → ShellExecuteW("open", target, args)
+  uwp         → IApplicationActivationManager::ActivateApplication(aumid)
+  成功 → overlay.hide(HideReason::Launch)    # 不恢复焦点，让新应用留在前台
+        → bump_usage(key, "app")             # 失败只记日志，不影响打开
+  失败 → 返回 launcher.launch_failed，浮层保持可见
 ```
 
-剪贴板快照/还原的保真边界见 `WIN32-NOTES.md` 第 4 节。
+先启动再隐藏：失败时用户可以直接换一条重试，符合「执行失败不关闭面板」。
 
 ## 8. 检索与排名
-
-### 8.1 应用/命令
 
 ```
 score = match_score(kind) × frecency × source_weight
@@ -424,10 +381,6 @@ source_weight: start_menu 1.0 | app_paths 0.95 | uwp 0.9 | builtin 1.05
 ```
 
 同分按标题长度升序、再按 key 字典序，保证结果稳定（测试需要）。
-
-### 8.2 文件
-
-`match_score` 只对文件名计算，路径命中给 0.5 系数；额外加权 `min(0.2, 1/(1+days_since_modified))`。结果去重按真实路径（大小写不敏感）。
 
 ## 9. 应用索引
 
@@ -442,20 +395,13 @@ source_weight: start_menu 1.0 | app_paths 0.95 | uwp 0.9 | builtin 1.05
 
 T-302 实现补充：刷新线程启动即建一次，之后每 600s 全量扫描并与现有索引逐行对比，未变化不写库；扫描与命令重建共用互斥锁。启动不阻塞 setup / UI。
 
-## 10. 文件索引（兜底）
-
-- 根目录来自设置（默认桌面/下载/文档），最多 5 个，深度 ≤3，单根条目上限 50 万。
-- 排除规则集中在一个 `should_skip(path)` 函数，含 `node_modules`、`.git`、`target`、`AppData`、隐藏系统目录。
-- 构建分片：每 2000 条提交一次；可取消（`AtomicBool`）。
-- 与 Everything 并存时，结果合并后按路径去重。
-
-## 11. 配置
+## 10. 配置
 
 `Settings` 为单一结构体（serde），持久化到 `settings` 表的一行 JSON 或多行 key；读取时对每个字段做范围校验，非法值回退默认并记录一条 warn（不含用户数据）。
 
-默认值集中在 `services/config.rs::Settings::default()`，是唯一事实来源；`docs/SPEC.md` §9 必须与之一致。
+默认值集中在 `services/config.rs::Settings::default()`，是唯一事实来源；`docs/SPEC.md` §7 必须与之一致。
 
-## 12. 错误模型
+## 11. 错误模型
 
 ```rust
 #[derive(Debug, thiserror::Error)]
@@ -466,8 +412,6 @@ pub enum AppError {
     ClipboardRead,
     #[error("目标窗口权限较高，无法自动操作")]
     ElevatedTarget,
-    #[error("未检测到选中文本")]
-    NoSelection,
     #[error("文本过长（超过 256KB）")]
     TooLarge,
     #[error("热键 {0} 已被其他程序占用")]
@@ -481,7 +425,7 @@ pub enum AppError {
 
 序列化为 `{ code, message }`，code 稳定，message 为中文可直接展示。`Internal` 只携带脱敏信息，详细堆栈进日志。
 
-### 12.1 错误码注册表
+### 11.1 错误码注册表
 
 新增错误码时必须更新本表，前端 `lib/ipc.ts` 的 toast 映射也依据本表。
 
@@ -490,12 +434,12 @@ pub enum AppError {
 | `clipboard.busy` | 剪贴板被其他程序占用 | 「剪贴板暂时被占用，请稍后重试」 |
 | `clipboard.read_failed` | 读取剪贴板失败 | 「无法读取剪贴板内容」 |
 | `focus.elevated_target` | 目标窗口权限较高 | 「目标窗口权限较高，无法自动操作」 |
-| `selection.empty` | 未检测到选中文本 | 「未检测到选中文本」 |
 | `content.too_large` | 内容超过大小限制 | 「内容过长（超过 256KB）」 |
 | `hotkey.conflict` | 热键被其他程序占用 | 「{热键} 已被其他程序占用」 |
 | `hotkey.register_failed` | 热键注册失败 | 「热键注册失败，请尝试更换」 |
 | `storage.error` | 数据库操作失败 | 「数据库操作失败」 |
 | `settings.invalid` | 设置值不合法 | 「设置值不合法，已恢复默认」 |
+| `launcher.launch_failed` | 打开应用失败 | 「无法打开该应用，请确认它仍然安装」 |
 | `internal` | 内部错误 | 「发生内部错误，请查看日志」 |
 
 **规则**：
@@ -503,7 +447,7 @@ pub enum AppError {
 - `message` 简体中文，可直接展示给用户，不含技术细节。
 - `internal` 类错误不暴露细节给前端，只记日志（脱敏）。
 
-## 13. 日志与隐私
+## 12. 日志与隐私
 
 - 位置：`%APPDATA%\com.quickwin.app\logs\quickwin.YYYY-MM-DD.log`，保留 7 天。
 - 级别：release 默认 `info`；`--verbose` 启动为 `debug`。
@@ -511,7 +455,7 @@ pub enum AppError {
 - 禁止记录：剪贴板内容、窗口标题、文件路径、URL 查询串。
 - `diagnostics_export` 导出前再过一遍脱敏白名单。
 
-## 14. 性能策略
+## 13. 性能策略
 
 | 场景 | 手段 |
 |---|---|
@@ -522,11 +466,10 @@ pub enum AppError {
 | 剪贴板轮询 | 只读序列号，无变化不打开剪贴板 |
 | 数据库 | WAL + 批量事务 + 定期 `wal_checkpoint(TRUNCATE)` |
 
-## 15. 测试策略
+## 14. 测试策略
 
 | 层 | 方式 | 必测内容 |
 |---|---|---|
-| `actions/` | `cargo test` 纯函数 | 判定表正例/反例/边界、时区、emoji、超长文本 |
 | `services/storage` | 内存 SQLite | 去重、FTS 同步、TTL、容量淘汰、迁移 |
 | `services/ranking` | 纯函数 | 排序稳定性、frecency 衰减 |
 | IPC 契约 | 快照测试 | Rust 序列化字段集合 == TS 类型字段集合 |
@@ -534,19 +477,18 @@ pub enum AppError {
 | `platform/` | 手动清单 | 见 `WIN32-NOTES.md` 第 10 节 |
 | 迁移 | 每个 schema 版本一条 | 旧库 → 新库数据完整性 |
 
-**测试命名**：用中文描述行为，例如 `fn 十位数字超出合理区间时不应识别为时间戳()`。
+**测试命名**：用中文描述行为，例如 `fn 三次复制同一内容只保留一条记录()`。
 
-## 16. 目录与命名
+## 15. 目录与命名
 
 见 `AGENTS.md` 第 5 节。新增模块必须同时更新该节，否则视为文档滞后。
 
-## 17. 风险与对策
+## 16. 风险与对策
 
 | 风险 | 影响 | 对策 |
 |---|---|---|
 | `Alt+Space` 被占用 | 核心入口不可用 | 注册失败检测 + 一键换绑 + 备选键 |
-| UIPI 限制 | 部分应用无法粘贴/取词 | 明确提示、降级为复制、文档说明 |
-| 剪贴板格式还原不保真 | 取词后用户剪贴板被改 | 只还原可还原格式；失败告警；测试覆盖 5 类 |
+| UIPI 限制 | 部分应用无法自动粘贴 | 明确提示、降级为复制、文档说明 |
 | FTS5 trigram 对 1–2 字无效 | 中文短词搜不到 | 回退 `LIKE`；数据量小，性能可接受 |
 | 图片占满磁盘 | 用户磁盘告警 | 500MB 预算 + LRU + 设置页可见 |
 | 安全软件误报 | 无法安装/运行 | 不注入其他进程、不做键盘钩子、不写自启注册表（走系统 API） |

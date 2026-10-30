@@ -7,6 +7,7 @@ import type { LauncherItem, LauncherQueryResult } from '../lib/launcher';
 vi.mock('../lib/ipc', () => ({
   ipc: {
     launcherQuery: vi.fn(),
+    launcherExecute: vi.fn(),
   },
 }));
 
@@ -20,12 +21,12 @@ const results: LauncherItem[] = [
     score: 0.9,
   },
   {
-    key: 'web:google:chr',
-    title: '用 Google 搜索 "chr"',
-    subtitle: '网页',
-    kind: 'web',
+    key: 'canary.exe',
+    title: 'Chrome Canary',
+    subtitle: 'C:\\Apps\\canary.exe',
+    kind: 'app',
     icon: null,
-    score: 0,
+    score: 0.8,
   },
 ];
 
@@ -37,24 +38,20 @@ describe('启动器面板', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockResult({ items: results, hint: null });
+    vi.mocked(ipc.launcherExecute).mockResolvedValue(undefined);
   });
 
-  it('展示分组与结果，键盘移动后 Enter 给出提示', async () => {
+  it('展示分组与结果，键盘移动后选中第二项', async () => {
     render(<LauncherPanel />);
 
     await waitFor(() => expect(screen.getByText('Google Chrome')).toBeTruthy());
     expect(screen.getByText('应用')).toBeTruthy();
-    expect(screen.getAllByText('网页').length).toBeGreaterThan(0);
+    expect(screen.getByText('Chrome Canary')).toBeTruthy();
 
     const input = screen.getByLabelText('搜索应用');
     fireEvent.keyDown(input, { key: 'ArrowDown' });
     const options = screen.getAllByRole('option');
     expect(options[1]?.getAttribute('aria-selected')).toBe('true');
-
-    fireEvent.keyDown(input, { key: 'Enter' });
-    await waitFor(() =>
-      expect(screen.getByText('网页搜索将在 T-305 接入')).toBeTruthy(),
-    );
   });
 
   it('查询失败时在底部提示且不崩溃', async () => {
@@ -62,5 +59,49 @@ describe('启动器面板', () => {
     render(<LauncherPanel />);
 
     await waitFor(() => expect(screen.getByText('数据库操作失败')).toBeTruthy());
+  });
+
+  it('Enter 打开选中应用并调用 launcher_execute', async () => {
+    render(<LauncherPanel />);
+
+    await waitFor(() => expect(screen.getByText('Google Chrome')).toBeTruthy());
+    fireEvent.keyDown(screen.getByLabelText('搜索应用'), { key: 'Enter' });
+
+    await waitFor(() =>
+      expect(ipc.launcherExecute).toHaveBeenCalledWith('chrome.exe'),
+    );
+  });
+
+  it('打开失败时底部显示错误且面板保留', async () => {
+    vi.mocked(ipc.launcherExecute).mockRejectedValue(
+      new Error('无法打开该应用，请确认它仍然安装'),
+    );
+    render(<LauncherPanel />);
+
+    await waitFor(() => expect(screen.getByText('Google Chrome')).toBeTruthy());
+    fireEvent.keyDown(screen.getByLabelText('搜索应用'), { key: 'Enter' });
+
+    await waitFor(() =>
+      expect(screen.getByText('无法打开该应用，请确认它仍然安装')).toBeTruthy(),
+    );
+    expect(screen.getByLabelText('搜索应用')).toBeTruthy();
+  });
+
+  it('执行中重复按 Enter 只触发一次打开', async () => {
+    let resolveLaunch: () => void = () => undefined;
+    vi.mocked(ipc.launcherExecute).mockReturnValue(
+      new Promise<void>((resolve) => {
+        resolveLaunch = resolve;
+      }),
+    );
+    render(<LauncherPanel />);
+
+    await waitFor(() => expect(screen.getByText('Google Chrome')).toBeTruthy());
+    const input = screen.getByLabelText('搜索应用');
+    fireEvent.keyDown(input, { key: 'Enter' });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    expect(ipc.launcherExecute).toHaveBeenCalledTimes(1);
+    resolveLaunch();
   });
 });

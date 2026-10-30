@@ -9,7 +9,6 @@ use crate::services::hotkey::{HotkeyAction, HotkeyManager};
 use crate::services::paste::PasteOptions;
 use crate::services::storage::{ClipboardStorage, DbPath};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt;
 
@@ -109,69 +108,6 @@ pub async fn settings_reset(app: tauri::AppHandle) -> Result<Settings, AppError>
     settings_update(app, patch).await
 }
 
-/// 暂停 / 恢复记录（托盘临时暂停：不写持久化值）
-///
-/// `duration_s = None` 表示暂停直到重启；`Some(0)` 表示恢复记录。
-#[tauri::command]
-pub async fn settings_set_paused(
-    app: tauri::AppHandle,
-    duration_s: Option<i64>,
-) -> Result<(), AppError> {
-    let path = db_path(&app)?;
-
-    tauri::async_runtime::spawn_blocking(move || -> Result<(), AppError> {
-        let mut storage = ClipboardStorage::open_write_at(&path)?;
-        let flags = app.state::<crate::services::clipboard::RuntimeFlags>();
-
-        let mut keys = Vec::new();
-
-        match duration_s {
-            Some(0) => {
-                // 恢复：清进程内暂停，并把持久化暂停关掉（事务）
-                flags.set_pause_until(None);
-                storage.transaction_update_settings(|current| {
-                    if current.pause_recording {
-                        let mut next = current.clone();
-                        next.pause_recording = false;
-                        Ok(next)
-                    } else {
-                        Ok(current.clone())
-                    }
-                })?;
-                keys.push("pause_recording".to_string());
-            }
-            None => {
-                // 暂停直到重启：仅进程内（用超长到期时间表示，重启后状态自然消失）
-                let until = Instant::now() + Duration::from_secs(60 * 60 * 24 * 365);
-                flags.set_pause_until(Some(until));
-                keys.push("pause_recording".to_string());
-            }
-            Some(seconds) if seconds > 0 => {
-                // 定时暂停：仅进程内，到期自动恢复，重启后不再暂停
-                let until =
-                    std::time::Instant::now() + std::time::Duration::from_secs(seconds as u64);
-                flags.set_pause_until(Some(until));
-                keys.push("pause_recording".to_string());
-            }
-            Some(_) => {
-                return Err(AppError::SettingsInvalid("暂停时长必须为正数".to_string()));
-            }
-        }
-
-        app.emit(
-            "settings://changed",
-            SettingsChanged {
-                keys,
-                failed: Vec::new(),
-            },
-        )
-        .map_err(|e| AppError::Internal(format!("emit pause changed: {}", e)))?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| AppError::Internal(format!("settings_set_paused failed: {}", e)))?
-}
-
 /// 应用设置副作用；返回注册失败的热键 accelerator 列表
 fn apply_side_effects(
     app: &tauri::AppHandle,
@@ -193,12 +129,6 @@ fn apply_side_effects(
         && !rebind_one(app, HotkeyAction::Clipboard, &next.clipboard_hotkey)?
     {
         failed.push(next.clipboard_hotkey.clone());
-    }
-    if changed.contains(&"actions_hotkey".to_string())
-        && previous.actions_hotkey != next.actions_hotkey
-        && !rebind_one(app, HotkeyAction::Actions, &next.actions_hotkey)?
-    {
-        failed.push(next.actions_hotkey.clone());
     }
 
     // 开机自启：失败不阻断保存，与热键策略一致（返回结果由前端提示）

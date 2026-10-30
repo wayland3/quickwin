@@ -38,8 +38,6 @@ pub enum LauncherKind {
     File,
     #[serde(rename = "command")]
     Command,
-    #[serde(rename = "web")]
-    Web,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,28 +66,6 @@ pub struct LauncherQueryResult {
     pub hint: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActionOffer {
-    pub id: String,
-    pub group: String,
-    pub label: String,
-    pub preview: String,
-    pub primary: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DetectedKind {
-    pub kind: String,
-    pub value: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SelectionContext {
-    pub text: String,
-    pub kinds: Vec<DetectedKind>,
-    pub source_app: Option<String>,
-}
-
 /// 设置（存 settings 表，单条 JSON；v2 migration）
 ///
 /// 所有字段带 serde 默认值，旧版本 JSON 缺字段时自动补默认。
@@ -102,9 +78,6 @@ pub struct Settings {
     /// 剪贴板热键
     #[serde(default = "default_clipboard_hotkey")]
     pub clipboard_hotkey: String,
-    /// 划词热键
-    #[serde(default = "default_actions_hotkey")]
-    pub actions_hotkey: String,
     /// 保留天数：7 / 15 / 30 / 90，-1 表示永不
     #[serde(default = "default_retention_days")]
     pub retention_days: i32,
@@ -145,10 +118,6 @@ fn default_launcher_hotkey() -> String {
 fn default_clipboard_hotkey() -> String {
     "Alt+V".to_string()
 }
-/// 划词热键默认值
-fn default_actions_hotkey() -> String {
-    "Alt+X".to_string()
-}
 /// 保留天数默认 15 天
 fn default_retention_days() -> i32 {
     15
@@ -175,7 +144,6 @@ impl Default for Settings {
         Self {
             launcher_hotkey: default_launcher_hotkey(),
             clipboard_hotkey: default_clipboard_hotkey(),
-            actions_hotkey: default_actions_hotkey(),
             retention_days: default_retention_days(),
             max_items: default_max_items(),
             record_text: true,
@@ -202,18 +170,14 @@ impl Settings {
         let hotkeys = [
             ("启动器热键", &self.launcher_hotkey),
             ("剪贴板热键", &self.clipboard_hotkey),
-            ("划词热键", &self.actions_hotkey),
         ];
         for (name, accelerator) in hotkeys {
             validate_hotkey(accelerator).map_err(|reason| format!("{}：{}", name, reason))?;
         }
 
-        // 三个热键不能相同，否则必然注册冲突
-        if self.launcher_hotkey == self.clipboard_hotkey
-            || self.launcher_hotkey == self.actions_hotkey
-            || self.clipboard_hotkey == self.actions_hotkey
-        {
-            return Err("三个全局热键不能重复".to_string());
+        // 两个热键不能相同，否则必然注册冲突
+        if self.launcher_hotkey == self.clipboard_hotkey {
+            return Err("两个全局热键不能重复".to_string());
         }
 
         if !Self::VALID_RETENTION_DAYS.contains(&self.retention_days) {
@@ -431,6 +395,16 @@ mod settings_tests {
 
     #[test]
     #[allow(non_snake_case)]
+    fn 旧JSON含已删除字段时被忽略() {
+        // 旧版本设置里存在 actions_hotkey（划词热键），升级后不应导致读取失败
+        let json = r#"{"launcher_hotkey":"Alt+Space","clipboard_hotkey":"Alt+V","actions_hotkey":"Alt+X"}"#;
+        let settings: Settings = serde_json::from_str(json).expect("parse legacy json");
+        assert_eq!(settings.clipboard_hotkey, "Alt+V");
+        assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
     fn 设置保存读取往返() {
         let storage = crate::services::storage::ClipboardStorage::open_in_memory()
             .expect("open in-memory storage");
@@ -448,20 +422,13 @@ mod settings_tests {
 
     #[test]
     #[allow(non_snake_case)]
-    fn 三个热键相同被拒绝() {
-        let first = Settings {
+    fn 两个热键相同被拒绝() {
+        let settings = Settings {
             launcher_hotkey: "Alt+V".to_string(),
             clipboard_hotkey: "Alt+V".to_string(),
             ..Settings::default()
         };
-        assert!(first.validate().is_err());
-
-        let second = Settings {
-            launcher_hotkey: "Alt+X".to_string(),
-            actions_hotkey: "Alt+X".to_string(),
-            ..Settings::default()
-        };
-        assert!(second.validate().is_err());
+        assert!(settings.validate().is_err());
     }
 
     /// IPC 契约测试：验证 Rust 序列化字段集合与前端 fixture 一致

@@ -83,12 +83,12 @@ quickwin/
 ├── TASKS.md                   # 任务与进度（唯一进度源）
 ├── docs/                      # 规格、架构、编码规范、平台笔记、UI、ADR
 ├── scripts/                   # 环境检查等脚本
-├── .opencode/skills/          # feature-slice / tauri-win32 / release-check
+├── .opencode/skills/          # feature-slice / tauri-win32
 ├── .opencode/commands/verify.md
 ├── src/                       # React 渲染层
 │   ├── main.tsx
-│   ├── App.tsx                # 按 mode 渲染 Launcher / Clipboard / Actions
-│   ├── windows/               # 三个浮层模式 + 设置窗口
+│   ├── App.tsx                # 按 mode 渲染 Launcher / Clipboard
+│   ├── windows/               # 两个浮层模式 + 设置窗口
 │   ├── components/            # 通用组件（列表、空态、快捷键提示）
 │   ├── lib/ipc.ts             # 唯一的 Tauri 调用入口（带类型）
 │   ├── lib/keys.ts            # 键盘映射与导航
@@ -102,12 +102,11 @@ quickwin/
 │       ├── error.rs           # AppError
 │       ├── commands/          # Tauri command，只做参数校验与编排
 │       ├── services/          # 业务：storage / search / ranking / hotkey / config / tray
-│       ├── platform/          # Win32 唯一出口：input / clipboard / focus / apps / files
-│       └── actions/           # 划词检测与转换（纯函数，必须单测）
+│       └── platform/          # Win32 唯一出口：input / clipboard / focus / apps
 └── tests/                     # 前端集成测试（vitest）
 ```
 
-依赖方向：`commands → services → platform`；`actions` 为纯函数模块，可被 `services` 调用，不得反向依赖 `platform`。循环依赖一律视为设计错误。
+依赖方向：`commands → services → platform`。循环依赖视为设计错误。
 
 ## 6. 定义完成（DoD）
 
@@ -125,7 +124,7 @@ quickwin/
 
 ## 7. 已知限制（不要当 bug 去修）
 
-1. **UIPI**：无法向管理员权限窗口发送输入，也无法从其取词。只能提示用户「目标窗口权限较高」。
+1. **UIPI**：无法向管理员权限窗口发送输入。只能提示用户「目标窗口权限较高」。
 2. **热键占用**：`Alt+Space` 可能被 PowerToys Run / 输入法占用。处理方式是可检测、可换绑、有提示，而不是换用更底层的键盘钩子（v1 不做）。
 3. **剪贴板富格式保真**：跨应用还原 HTML/RTF 时格式可能丢失；v1 只保证文本、图片、文件列表可用。
 4. **首次构建慢**：`rusqlite` bundled 首次编译 30–60s，属正常现象。
@@ -185,10 +184,7 @@ L0 任务无需 Reviewed-by trailer，在 TASKS.md 备注「L0 自验」即可�
 
 | 术语 | 定义 |
 |------|------|
-| 浮层 | 无边框置顶透明窗口，失焦自动隐藏；分 Launcher / Clipboard / Actions 三种模式 |
-| 取词 | 通过模拟 `Ctrl+C` 从目标窗口获取选中文本的过程（`selection_capture`） |
-| 动作 | 对取词结果的处理（转换、复制、替换），显示在动作菜单中 |
-| 动作菜单 | Actions 模式下展示的「检测结果标签 + 动作列表 + 右侧预览」 |
+| 浮层 | 无边框置顶透明窗口，失焦自动隐藏；分 Launcher / Clipboard 两种模式 |
 | 保留策略 | TTL + 条数/容量上限 + 清理时机的组合（见 T-206） |
 | frecency | frequency + recency，综合使用次数与最近使用时间的排序指标 |
 | 质量门 | `npm.cmd run verify`（全量）/ `verify:fe`（前端）/ `verify:be`（后端），包含 typecheck + lint + test + rustfmt + clippy + rust test |

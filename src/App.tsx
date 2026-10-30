@@ -1,14 +1,20 @@
 import { useEffect, useState } from 'react';
 import { ipc } from './lib/ipc';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { ClipboardPanel } from './windows/ClipboardPanel';
 import { LauncherPanel } from './windows/LauncherPanel';
+import { SettingsPanel } from './windows/SettingsPanel';
+import { applyTheme } from './lib/theme';
+import type { Theme } from './lib/theme';
 
 function App() {
   const [pingResult, setPingResult] = useState<string>('');
   const [error, setError] = useState<string>('');
   const [mode, setMode] = useState<string>('');
   const [toast, setToast] = useState<{ message: string; level: string } | null>(null);
+  // 同步初始化，避免首帧渲染错误内容
+  const [isSettingsWindow] = useState(() => getCurrentWindow().label === 'settings');
 
   useEffect(() => {
     if (!toast) return;
@@ -20,6 +26,11 @@ function App() {
     ipc.appPing()
       .then((result) => setPingResult(result))
       .catch((err) => setError(String(err)));
+
+    // 启动时读取设置并应用初始主题
+    ipc.settingsGet()
+      .then((settings) => applyTheme(settings.theme as Theme))
+      .catch(() => undefined);
 
     // 监听 overlay://show 事件（来自托盘菜单）：同时重查失败热键，保证托盘直达也有提示
     const unlistenShow = listen<string>('overlay://show', (event) => {
@@ -45,8 +56,6 @@ function App() {
         ipc.overlayShow('launcher').catch(console.error);
       } else if (action === 'clipboard') {
         ipc.overlayShow('clipboard').catch(console.error);
-      } else if (action === 'actions') {
-        ipc.overlayShow('actions').catch(console.error);
       }
     });
 
@@ -107,32 +116,21 @@ function App() {
       },
     );
 
-    // 托盘暂停记录事件：转到设置服务（30 分钟=Some(1800)，恢复=Some(0)，直到重启=null）
-    const unlistenClipboardPause = listen<number | null>(
-      'clipboard://pause',
-      (event) => {
-        const duration = event.payload;
-        ipc
-          .settingsSetPaused(duration)
-          .then(() => {
-            const message =
-              duration === null
-                ? '已暂停记录（直到重启）'
-                : duration === 0
-                  ? '已恢复记录'
-                  : '已暂停记录 30 分钟';
-            setToast({ message, level: 'info' });
-          })
-          .catch(() => undefined);
-      },
-    );
-
-    // 设置变更：热键占用等情况通过统一 toast 提示
+    // 设置变更：应用主题 + 热键占用等情况通过统一 toast 提示
     const unlistenSettingsChanged = listen<{
       keys: string[];
       failed: string[];
     }>('settings://changed', (event) => {
+      const keys = event.payload?.keys ?? [];
       const failed = event.payload?.failed ?? [];
+      
+      // 如果 theme 字段变更了，重新读取并应用
+      if (keys.includes('theme')) {
+        ipc.settingsGet()
+          .then((settings) => applyTheme(settings.theme as Theme))
+          .catch(() => undefined);
+      }
+      
       if (failed.length > 0) {
         setToast({
           message: `热键 ${failed.join('、')} 已被其他程序占用`,
@@ -149,11 +147,15 @@ function App() {
       unlistenInsertError.then(f => f());
       unlistenToast.then(f => f());
       unlistenHotkeyFailed.then(f => f());
-      unlistenClipboardPause.then(f => f());
       unlistenSettingsChanged.then(f => f());
       window.removeEventListener('keydown', handleKeyDown);
     };
   }, []);
+
+  // 如果是设置窗口，直接渲染设置面板
+  if (isSettingsWindow) {
+    return <SettingsPanel />;
+  }
 
   return (
     <main className="qw-root">

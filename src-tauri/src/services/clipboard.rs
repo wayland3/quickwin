@@ -62,55 +62,6 @@ impl ThrottledEmitter {
     }
 }
 
-/// 设置的进程内运行时覆盖（不持久化）
-///
-/// 用于托盘暂停：
-/// - 「暂停直到重启」：`pause_until=Some(now+1年)`（用 Instant 模拟，重启后状态自然消失）
-/// - 「暂停 30 分钟」：`pause_until=Some(now+30min)`，到期自动恢复
-/// - `pause_until=None` 表示不暂停
-#[derive(Clone)]
-pub struct RuntimeFlags {
-    pause_until: Arc<Mutex<Option<Instant>>>,
-}
-
-impl RuntimeFlags {
-    pub fn new() -> Self {
-        Self {
-            pause_until: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    /// 设置暂停截止时间：`None`=清除暂停（恢复记录），`Some(at)`=定时恢复
-    pub fn set_pause_until(&self, until: Option<Instant>) {
-        if let Ok(mut state) = self.pause_until.lock() {
-            *state = until;
-        }
-    }
-
-    /// 是否当前应暂停（定时已过会自动清除并返回 false）
-    pub fn is_paused(&self, now: Instant) -> bool {
-        let Ok(mut state) = self.pause_until.lock() else {
-            return false;
-        };
-
-        match *state {
-            None => false,
-            Some(until) if until > now => true,
-            Some(_) => {
-                // 定时暂停已过期，自动恢复
-                *state = None;
-                false
-            }
-        }
-    }
-}
-
-impl Default for RuntimeFlags {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// 粘贴抑制窗口（PRD 6.4：1.5s）
 pub const PASTE_SUPPRESS_WINDOW: Duration = Duration::from_millis(1500);
 
@@ -244,12 +195,7 @@ impl ClipboardMonitor {
     /// 启动剪贴板监听
     ///
     /// - `suppression` 由 paste 流程共享，用于跳过粘贴回声
-    /// - `flags` 提供「暂停直到重启」的进程内覆盖
-    pub fn start(
-        app: AppHandle,
-        suppression: PasteSuppression,
-        flags: RuntimeFlags,
-    ) -> Result<Self, AppError> {
+    pub fn start(app: AppHandle, suppression: PasteSuppression) -> Result<Self, AppError> {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_clone = stop_flag.clone();
 
@@ -287,12 +233,6 @@ impl ClipboardMonitor {
                     run_cleanup(&mut storage, &settings, &app);
                     last_cleanup = Instant::now();
                     writes_since_cleanup = 0;
-                }
-
-                // 暂停记录：持久化开关或进程内定时/永久暂停
-                if settings.pause_recording || flags.is_paused(Instant::now()) {
-                    last_seq = get_sequence_number().unwrap_or(last_seq);
-                    continue;
                 }
 
                 let current_seq = match get_sequence_number() {
@@ -552,40 +492,5 @@ mod tests {
         suppression.seal(20, 21, Some("hash-a".to_string()), now);
         assert!(suppression.should_skip_hash("hash-a", now));
         assert!(!suppression.should_skip_hash("hash-b", now));
-    }
-
-    #[test]
-    #[allow(non_snake_case)]
-    fn 定时暂停到期自动恢复() {
-        let flags = RuntimeFlags::new();
-        let start = Instant::now();
-        let until = start + Duration::from_millis(50);
-
-        flags.set_pause_until(Some(until));
-        assert!(flags.is_paused(start));
-        assert!(flags.is_paused(start + Duration::from_millis(30)));
-        assert!(!flags.is_paused(start + Duration::from_millis(60)));
-
-        // 过期后状态应被清除
-        assert!(!flags.is_paused(start + Duration::from_millis(100)));
-    }
-
-    #[test]
-    #[allow(non_snake_case)]
-    fn 永久暂停不会到期() {
-        let flags = RuntimeFlags::new();
-        let start = Instant::now();
-        let until = start + Duration::from_secs(60 * 60 * 24 * 365);
-
-        flags.set_pause_until(Some(until));
-        assert!(flags.is_paused(start));
-        assert!(flags.is_paused(start + Duration::from_secs(60)));
-    }
-
-    #[test]
-    #[allow(non_snake_case)]
-    fn 未暂停时返回false() {
-        let flags = RuntimeFlags::new();
-        assert!(!flags.is_paused(Instant::now()));
     }
 }

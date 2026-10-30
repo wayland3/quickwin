@@ -9,18 +9,16 @@ const EMPTY_QUERY_PLACEHOLDER = '搜索应用';
 /** 启动器查询词跨隐藏保留（SPEC §4：启动器保留上一次查询） */
 let persistedQuery = '';
 
-function errorMessage(err: unknown): string {
+function errorMessage(err: unknown, fallback = '搜索失败，请稍后重试'): string {
   if (err && typeof err === 'object' && 'message' in err) {
     const message = (err as { message: unknown }).message;
     if (typeof message === 'string' && message) return message;
   }
-  return '搜索失败，请稍后重试';
+  return fallback;
 }
 
 function groupLabel(kind: LauncherItem['kind']): string {
   switch (kind) {
-    case 'web':
-      return '网页';
     case 'command':
       return '命令';
     case 'file':
@@ -42,6 +40,7 @@ export function LauncherPanel() {
   const genRef = useRef(0);
   const hintTimerRef = useRef<number | undefined>(undefined);
   const selectedRef = useRef(0);
+  const launchingRef = useRef(false);
 
   const showHint = useCallback((message: string) => {
     setHint(message);
@@ -94,6 +93,23 @@ export function LauncherPanel() {
     setSelected(next);
   };
 
+  const open = (item: LauncherItem | undefined) => {
+    if (!item) return;
+    if (item.kind === 'command') {
+      showHint('内置命令将在 T-306 接入');
+      return;
+    }
+    if (launchingRef.current) return;
+    launchingRef.current = true;
+    setError('');
+    ipc
+      .launcherExecute(item.key)
+      .catch((err) => setError(errorMessage(err, '无法打开该应用')))
+      .finally(() => {
+        launchingRef.current = false;
+      });
+  };
+
   const handleKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
     switch (event.key) {
       case 'ArrowDown':
@@ -106,9 +122,7 @@ export function LauncherPanel() {
         break;
       case 'Enter': {
         event.preventDefault();
-        const current = items[selectedRef.current];
-        if (!current) break;
-        showHint(current.kind === 'web' ? '网页搜索将在 T-305 接入' : '打开功能将在 T-304 接入');
+        open(items[selectedRef.current]);
         break;
       }
       default:
@@ -161,10 +175,10 @@ export function LauncherPanel() {
                     selectedRef.current = index;
                     setSelected(index);
                   }}
-                  onDoubleClick={() => showHint('打开功能将在 T-304 接入')}
+                  onDoubleClick={() => open(item)}
                 >
                   <span className="qw-row-icon" aria-hidden="true">
-                    {item.kind === 'web' ? '🌐' : '▣'}
+                    {item.kind === 'command' ? '⌘' : '▣'}
                   </span>
                   <span className="qw-row-preview">{item.title}</span>
                   {item.subtitle && <span className="qw-row-meta">{item.subtitle}</span>}

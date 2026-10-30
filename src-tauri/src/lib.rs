@@ -52,6 +52,8 @@ pub fn run() {
             commands::overlay_resize,
             commands::hotkey_status,
             commands::hotkey_rebind,
+            commands::hotkey_suspend,
+            commands::hotkey_resume,
             commands::clipboard::clipboard_list,
             commands::clipboard::clipboard_get,
             commands::clipboard::clipboard_set_pinned,
@@ -62,9 +64,9 @@ pub fn run() {
             commands::settings::settings_get,
             commands::settings::settings_update,
             commands::settings::settings_reset,
-            commands::settings::settings_set_paused,
             commands::launcher::app_index_rebuild,
             commands::launcher::launcher_query,
+            commands::launcher::launcher_execute,
         ])
         .manage(OverlayManager::new())
         .manage(HotkeyManager::new())
@@ -135,15 +137,12 @@ pub fn run() {
 
             // 粘贴抑制状态：监听线程与 clipboard_activate 共享
             let suppression = services::clipboard::PasteSuppression::new();
-            let flags = services::clipboard::RuntimeFlags::new();
             app.manage(suppression.handle());
-            app.manage(flags.clone());
 
             // 启动剪贴板监听；monitor 必须交给 AppState 持有，否则线程会被立即回收
             match services::clipboard::ClipboardMonitor::start(
                 app.handle().clone(),
                 suppression,
-                flags,
             ) {
                 Ok(monitor) => {
                     app.manage(monitor);
@@ -189,11 +188,6 @@ fn register_startup_hotkeys(
             HotkeyAction::Clipboard,
             settings.clipboard_hotkey.as_str(),
             "Alt+V",
-        ),
-        (
-            HotkeyAction::Actions,
-            settings.actions_hotkey.as_str(),
-            "Alt+X",
         ),
     ];
 

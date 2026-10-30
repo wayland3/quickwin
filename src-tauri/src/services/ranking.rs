@@ -168,22 +168,6 @@ pub fn rank_apps(
     items
 }
 
-/// 无结果时补一条网页搜索兜底项
-pub fn with_web_fallback(mut items: Vec<LauncherItem>, query: &str) -> Vec<LauncherItem> {
-    let query = query.trim();
-    if items.is_empty() && !query.is_empty() {
-        items.push(LauncherItem {
-            key: format!("web:google:{}", query),
-            title: format!("用 Google 搜索 \"{}\"", query),
-            subtitle: Some("网页".to_string()),
-            kind: LauncherKind::Web,
-            icon: None,
-            score: 0.0,
-        });
-    }
-    items
-}
-
 fn subtitle_for(row: &AppIndexRow) -> String {
     match row.kind.as_str() {
         "uwp" => "UWP 应用".to_string(),
@@ -303,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn 无结果时给出网页兜底() {
+    fn 无匹配时返回空列表() {
         let now = 1_000_000_000_000i64;
         let items = rank_apps(
             "zzz",
@@ -312,11 +296,8 @@ mod tests {
             now,
             12,
         );
-        let items = with_web_fallback(items, "zzz");
 
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].kind, LauncherKind::Web);
-        assert!(items[0].title.contains("zzz"));
+        assert!(items.is_empty());
     }
 
     #[test]

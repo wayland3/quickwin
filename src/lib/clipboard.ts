@@ -51,7 +51,6 @@ export interface ClipboardListResult {
 export interface Settings {
   launcher_hotkey: string;
   clipboard_hotkey: string;
-  actions_hotkey: string;
   retention_days: number;
   max_items: number;
   record_text: boolean;

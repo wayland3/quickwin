@@ -128,23 +128,6 @@ send KEYUP(ctrl)
 
 ~~密码管理器（KeePassXC、1Password、Bitwarden）会设置这些标记。这是安全底线，不是可选项。~~
 
-### 4.4 快照与还原
-
-取词需要「临时借走剪贴板」再还回去：
-
-1. `EnumClipboardFormats` 收集所有格式 id。
-2. 对每个格式 `GetClipboardData` → `GlobalLock` → 复制字节 → `GlobalUnlock`。
-3. 记录 `GetClipboardSequenceNumber`。
-4. 发送 `Ctrl+C`，读文本。
-5. 还原：`EmptyClipboard` → 对每个可还原格式 `GlobalAlloc(GMEM_MOVEABLE)` + 拷贝 + `SetClipboardData`。
-
-已知边界：
-
-- 部分格式（延迟渲染、私有格式、OLE 对象）无法完整还原；跳过并记录数量。
-- 还原会再次改变序列号，监听线程必须通过「抑制窗口 + hash」跳过，否则历史里会出现一条本不该存在的记录。
-- 还原失败时**不要**清空剪贴板，保留当前内容更安全，并提示用户「剪贴板可能已变化」。
-- 图片尽量按 PNG 还原；DIB 还原在部分应用会丢透明度。
-
 ### 4.5 写入
 
 - `OpenClipboard` → `EmptyClipboard` → 按「富格式先、纯文本后」顺序 `SetClipboardData` → `CloseClipboard`。
@@ -191,9 +174,7 @@ physical_y = rcWork.top + (rcWork.height * 0.2)
 ### 7.2 启动
 
 - 普通程序：`ShellExecuteW`（走文件关联、UAC 清单、工作目录正确）。
-- 管理员：`ShellExecuteW` + `runas`，会弹 UAC；用户取消时静默返回。
 - UWP：`IApplicationActivationManager::ActivateApplication(aumid, ...)`。
-- 打开文件所在位置：`explorer.exe /select,"<path>"`。
 - 不要用 `CreateProcessW` 直接起 exe（会丢工作目录、参数转义和 UAC 清单）。
 
 ### 7.3 文件列表
@@ -216,7 +197,6 @@ physical_y = rcWork.top + (rcWork.height * 0.2)
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | 浮层在全屏游戏上不显示 | 独占全屏 | 提示切无边框窗口；不做 DirectX 覆盖 |
-| 中文输入法下取词异常 | 输入法组合态吞掉 Ctrl+C | 先发送 `Esc` 或等待 50ms 再复制（实验性，失败率可接受） |
 | 剪贴板读到的文本带 `\0` | `CF_UNICODETEXT` 双 null 结尾 | 按第一个 `\0` 截断 |
 | 粘贴后多出换行 | 源文本含 `\r\n`，目标控件转换 | 保留原样，不做隐式转换 |
 | 图片粘贴后变黑/透明丢失 | DIB 无 alpha | 统一转 PNG 存储与写回 |
@@ -229,11 +209,9 @@ physical_y = rcWork.top + (rcWork.height * 0.2)
 
 **基础**
 
-- [ ] 记事本、VS Code、Chrome 地址栏、Word、微信：`Alt+X` 取词正确
-- [ ] 同上 5 个应用：替换结果正确，无残留字符
-- [ ] 同上 5 个应用：`Alt+V` 回车粘贴正确
+- [ ] 记事本、VS Code、Chrome 地址栏、Word、微信：`Alt+V` 回车粘贴正确
 - [ ] 管理员运行的记事本：提示「权限较高」，剪贴板可用
-- [ ] 输入法（微软拼音）开启时取词与粘贴
+- [ ] 输入法（微软拼音）开启时粘贴
 - [ ] 选中 emoji + 中文 + 多行文本
 
 **焦点**

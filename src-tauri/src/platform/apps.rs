@@ -14,7 +14,7 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IBindCtx, IPersistFile,
-    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, STGM_READ,
+    CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, STGM_READ,
 };
 use windows::Win32::System::Registry::{
     RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER,
@@ -24,13 +24,18 @@ use windows::Win32::UI::Shell::PropertiesSystem::PROPERTYKEY;
 /// `KF_FLAG_DEFAULT` 来自该模块（值为 0）
 use windows::Win32::UI::Shell::KF_FLAG_DEFAULT;
 use windows::Win32::UI::Shell::{
-    FOLDERID_AppsFolder, IShellFolder, IShellItem2, IShellLinkW, SHCreateItemWithParent,
-    SHGetDesktopFolder, SHGetKnownFolderIDList, SHCONTF_FOLDERS, SHCONTF_NONFOLDERS,
-    SIGDN_NORMALDISPLAY,
+    FOLDERID_AppsFolder, IApplicationActivationManager, IShellFolder, IShellItem2, IShellLinkW,
+    SHCreateItemWithParent, SHGetDesktopFolder, SHGetKnownFolderIDList, ShellExecuteW, AO_NONE,
+    SHCONTF_FOLDERS, SHCONTF_NONFOLDERS, SIGDN_NORMALDISPLAY,
 };
+use windows::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY, SW_SHOWNORMAL};
 
 /// `CLSID_ShellLink`：快捷方式 COM 对象
 const CLSID_SHELL_LINK: GUID = GUID::from_u128(0x0002_1401_0000_0000_c000_0000_0000_0046);
+
+/// `CLSID_ApplicationActivationManager`：UWP 应用启动入口
+const CLSID_APPLICATION_ACTIVATION_MANAGER: GUID =
+    GUID::from_u128(0x45ba_127d_10a8_46ea_8ab7_56ea_9078_943c);
 
 /// `PKEY_AppUserModel_ID`（UWP 的 AUMID）
 const PKEY_APP_USER_MODEL_ID: PROPERTYKEY = PROPERTYKEY {
@@ -354,6 +359,113 @@ fn read_default_string(key: HKEY) -> Option<PathBuf> {
 
 fn wide_str(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// 允许被启动的进程抢占前台
+///
+/// 浮层此时是前台窗口；不授权的话，新启动的应用可能被前台锁挡在后台。
+/// 失败只影响前台体验，不影响启动本身，因此不做错误返回。
+pub fn allow_foreground() {
+    // SAFETY: 只传进程号常量，无指针参数；错误码无副作用
+    let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+}
+
+/// 用系统关联方式打开目标（普通 Win32 程序或 URL）
+pub fn launch_win32(target: &str, args: Option<&str>) -> Result<(), AppError> {
+    let operation = wide_str("open");
+    let file = wide_str(target);
+    let parameters = args.map(wide_str);
+
+    // SAFETY: 宽字符串在调用期间存活；hwnd 为空表示无父窗口；
+    // ShellExecuteW 返回值只当错误码使用，不是可释放的句柄。
+    let result = unsafe {
+        ShellExecuteW(
+            None::<&HWND>,
+            PCWSTR(operation.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            parameters
+                .as_deref()
+                .map_or(PCWSTR::null(), |value| PCWSTR(value.as_ptr())),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+
+    let code = result.0 as isize;
+    if code <= 32 {
+        // 只记录错误码，不记录目标路径（AGENTS.md §10）
+        log::warn!("launch win32 failed: code={}", code);
+        return Err(AppError::LaunchFailed(
+            shell_error_reason(code as u32).to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// 通过 `IApplicationActivationManager` 启动 UWP 应用（AUMID）
+pub fn launch_uwp(app_user_model_id: &str) -> Result<(), AppError> {
+    let _com = ComApartment::new()?;
+
+    // SAFETY: CLSID 为系统注册的激活服务；该 COM 对象需要 STA（ComApartment 已保证）
+    let manager: IApplicationActivationManager = unsafe {
+        CoCreateInstance(
+            &CLSID_APPLICATION_ACTIVATION_MANAGER,
+            None,
+            CLSCTX_LOCAL_SERVER,
+        )
+    }
+    .map_err(|error| {
+        log::warn!(
+            "create activation manager failed: code={:#010X}",
+            error.code().0
+        );
+        AppError::LaunchFailed("应用启动服务不可用，请稍后重试".to_string())
+    })?;
+
+    let aumid = wide_str(app_user_model_id);
+    // SAFETY: AUMID 与空参数串在调用期间存活；AO_NONE 表示默认激活
+    unsafe { manager.ActivateApplication(PCWSTR(aumid.as_ptr()), PCWSTR::null(), AO_NONE) }
+        .map_err(|error| {
+            log::warn!("activate uwp failed: code={:#010X}", error.code().0);
+            AppError::LaunchFailed("UWP 应用启动失败，请尝试从开始菜单打开".to_string())
+        })?;
+
+    Ok(())
+}
+
+/// `ShellExecuteW` 错误码 → 用户可见原因（不暴露数字给用户）
+fn shell_error_reason(code: u32) -> &'static str {
+    match code {
+        2 | 3 => "应用不存在或已被移动",
+        5 => "没有权限打开该应用",
+        31 => "找不到可打开该应用的关联程序",
+        32 => "缺少运行该应用所需的组件",
+        _ => "无法打开该应用",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 启动失败原因按错误码分类() {
+        assert_eq!(shell_error_reason(2), "应用不存在或已被移动");
+        assert_eq!(shell_error_reason(5), "没有权限打开该应用");
+        assert_eq!(shell_error_reason(31), "找不到可打开该应用的关联程序");
+        assert_eq!(shell_error_reason(32), "缺少运行该应用所需的组件");
+        assert_eq!(shell_error_reason(0), "无法打开该应用");
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 启动失败原因不含数字编码() {
+        for code in [0u32, 2, 3, 5, 31, 32, 999] {
+            let reason = shell_error_reason(code);
+            assert!(!reason.contains(&code.to_string()));
+        }
+    }
 }
 
 /// UWP 应用

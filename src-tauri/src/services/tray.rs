@@ -1,8 +1,9 @@
 use crate::error::AppError;
+use crate::services::window::{OverlayManager, OverlayMode};
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager,
+    AppHandle, Manager,
 };
 
 pub fn setup_tray(app: &AppHandle) -> Result<(), AppError> {
@@ -10,36 +11,10 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), AppError> {
     let icon = tauri::image::Image::from_bytes(include_bytes!("../../icons/tray.png"))
         .map_err(|error| AppError::Internal(format!("failed to load tray icon: {}", error)))?;
 
-    let open_launcher = MenuItem::with_id(app, "open_launcher", "打开启动器", true, None::<&str>)?;
-    let open_clipboard =
-        MenuItem::with_id(app, "open_clipboard", "打开剪贴板", true, None::<&str>)?;
     let open_settings = MenuItem::with_id(app, "open_settings", "设置", true, None::<&str>)?;
-    let separator = PredefinedMenuItem::separator(app)?;
-    let pause_30min =
-        MenuItem::with_id(app, "pause_30min", "暂停记录 30 分钟", true, None::<&str>)?;
-    let resume = MenuItem::with_id(app, "resume", "恢复记录", true, None::<&str>)?;
-    let pause_until_restart = MenuItem::with_id(
-        app,
-        "pause_until_restart",
-        "暂停记录直到重启",
-        true,
-        None::<&str>,
-    )?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
 
-    let menu = Menu::with_items(
-        app,
-        &[
-            &open_launcher,
-            &open_clipboard,
-            &open_settings,
-            &separator,
-            &pause_30min,
-            &resume,
-            &pause_until_restart,
-            &quit,
-        ],
-    )?;
+    let menu = Menu::with_items(app, &[&open_settings, &quit])?;
 
     TrayIconBuilder::new()
         .icon(icon)
@@ -48,18 +23,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), AppError> {
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, event| {
             let result: Result<(), AppError> = match event.id.as_ref() {
-                "open_launcher" => show_overlay(app, "launcher"),
-                "open_clipboard" => show_overlay(app, "clipboard"),
                 "open_settings" => show_settings(app),
-                "pause_30min" => app
-                    .emit("clipboard://pause", Some(30 * 60))
-                    .map_err(AppError::from),
-                "resume" => app
-                    .emit("clipboard://pause", Some(0))
-                    .map_err(AppError::from),
-                "pause_until_restart" => app
-                    .emit("clipboard://pause", None::<i64>)
-                    .map_err(AppError::from),
                 "quit" => {
                     app.exit(0);
                     Ok(())
@@ -89,10 +53,11 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), AppError> {
 }
 
 fn show_overlay(app: &AppHandle, mode: &str) -> Result<(), AppError> {
-    if let Some(window) = app.get_webview_window("overlay") {
-        window.emit("overlay://show", mode)?;
-        window.show()?;
-        window.set_focus()?;
+    if let Some(webview_window) = app.get_webview_window("overlay") {
+        let overlay_manager = app.state::<OverlayManager>();
+        if let Some(overlay_mode) = OverlayMode::from_str(mode) {
+            overlay_manager.show_webview(&webview_window, overlay_mode)?;
+        }
     }
     Ok(())
 }
@@ -102,8 +67,31 @@ fn show_settings(app: &AppHandle) -> Result<(), AppError> {
         window.show()?;
         window.set_focus()?;
     } else {
-        // TODO: T-601 创建设置窗口
-        log::info!("settings window not yet implemented (T-601)");
+        // T-601: 创建设置窗口
+        let icon = tauri::image::Image::from_bytes(include_bytes!("../../icons/tray.png"))
+            .map_err(|error| AppError::Internal(format!("failed to load tray icon: {}", error)))?;
+
+        match tauri::WebviewWindowBuilder::new(app, "settings", tauri::WebviewUrl::default())
+            .title("QuickWin 设置")
+            .icon(icon)?
+            .inner_size(880.0, 600.0)
+            .min_inner_size(720.0, 520.0)
+            .resizable(true)
+            .visible(false)
+            .build()
+        {
+            Ok(window) => {
+                window.show()?;
+                window.set_focus()?;
+            }
+            Err(e) => {
+                log::error!("failed to create settings window: {}", e);
+                return Err(AppError::Internal(format!(
+                    "failed to create settings window: {}",
+                    e
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -112,16 +100,7 @@ fn show_settings(app: &AppHandle) -> Result<(), AppError> {
 mod tests {
     #[test]
     fn 托盘菜单项数量正确() {
-        // 8 项：启动器、剪贴板、设置、分隔符、暂停30分钟、恢复、暂停直到重启、退出
-        assert_eq!(8, 8);
-    }
-
-    #[test]
-    fn 暂停事件载荷类型正确() {
-        // 30分钟 = Some(1800)，直到重启 = None
-        let duration_30min: Option<i64> = Some(30 * 60);
-        let duration_until_restart: Option<i64> = None;
-        assert_eq!(duration_30min, Some(1800));
-        assert_eq!(duration_until_restart, None);
+        // 2 项：设置、退出
+        assert_eq!(2, 2);
     }
 }

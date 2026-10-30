@@ -18,12 +18,12 @@ const ERROR_MESSAGES: Record<string, string> = {
   'clipboard.busy': '剪贴板暂时被占用，请稍后重试',
   'clipboard.read_failed': '无法读取剪贴板内容',
   'focus.elevated_target': '目标窗口权限较高，无法自动操作',
-  'selection.empty': '未检测到选中文本',
   'content.too_large': '内容过长（超过 256KB）',
   'hotkey.conflict': '热键已被其他程序占用',
   'hotkey.register_failed': '热键注册失败，请尝试更换',
   'storage.error': '数据库操作失败',
   'settings.invalid': '设置值不合法',
+  'launcher.launch_failed': '无法打开该应用，请确认它仍然安装',
   internal: '发生内部错误，请查看日志',
 };
 
@@ -31,6 +31,14 @@ const ERROR_MESSAGES: Record<string, string> = {
 function handleError(err: unknown, command?: string): never {
   if (err && typeof err === 'object' && 'code' in err) {
     const appError = err as AppError;
+    // 打开应用失败：后端文案已按原因分类（已卸载 / 无权限 / 无关联程序），直接展示
+    if (
+      appError.code === 'launcher.launch_failed' &&
+      typeof appError.message === 'string' &&
+      appError.message
+    ) {
+      throw new Error(appError.message);
+    }
     const message = ERROR_MESSAGES[appError.code];
     if (message) {
       throw new Error(message);
@@ -69,7 +77,7 @@ export const ipc = {
     return invokeWrapper<boolean>('autostart_is_enabled');
   },
 
-  async overlayShow(mode: string): Promise<void> {
+  async overlayShow(mode: 'launcher' | 'clipboard'): Promise<void> {
     return invokeWrapper<void>('overlay_show', { payload: { mode } });
   },
 
@@ -88,8 +96,19 @@ export const ipc = {
     return invokeWrapper('hotkey_status');
   },
 
-  async hotkeyRebind(action: string, accelerator: string): Promise<boolean> {
+  async hotkeyRebind(
+    action: 'launcher' | 'clipboard',
+    accelerator: string,
+  ): Promise<boolean> {
     return invokeWrapper<boolean>('hotkey_rebind', { action, accelerator });
+  },
+
+  async hotkeySuspend(action: 'launcher' | 'clipboard'): Promise<void> {
+    return invokeWrapper<void>('hotkey_suspend', { action });
+  },
+
+  async hotkeyResume(action: 'launcher' | 'clipboard'): Promise<void> {
+    return invokeWrapper<void>('hotkey_resume', { action });
   },
 
   async appIndexRebuild(): Promise<AppIndexRebuildResult> {
@@ -98,6 +117,10 @@ export const ipc = {
 
   async launcherQuery(query: string, limit?: number): Promise<LauncherQueryResult> {
     return invokeWrapper<LauncherQueryResult>('launcher_query', { query, limit });
+  },
+
+  async launcherExecute(key: string): Promise<void> {
+    return invokeWrapper<void>('launcher_execute', { key });
   },
 
   async clipboardList(params: {
@@ -143,9 +166,5 @@ export const ipc = {
 
   async settingsReset(): Promise<Settings> {
     return invokeWrapper<Settings>('settings_reset');
-  },
-
-  async settingsSetPaused(durationSeconds: number | null): Promise<void> {
-    return invokeWrapper<void>('settings_set_paused', { durationS: durationSeconds });
   },
 };

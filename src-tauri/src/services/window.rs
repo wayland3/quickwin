@@ -21,7 +21,6 @@ pub enum OverlayState {
 pub enum OverlayMode {
     Launcher,
     Clipboard,
-    Actions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +28,7 @@ pub enum HideReason {
     UserCommand, // overlay_hide 命令，带恢复
     Blur,        // 失焦隐藏，不带恢复
     ModeSwitch,  // 模式切换，不带恢复
+    Launch,      // 打开应用后隐藏，不恢复焦点（让新应用留在前台）
 }
 
 impl OverlayMode {
@@ -36,7 +36,6 @@ impl OverlayMode {
         match self {
             OverlayMode::Launcher => "launcher",
             OverlayMode::Clipboard => "clipboard",
-            OverlayMode::Actions => "actions",
         }
     }
 
@@ -44,7 +43,6 @@ impl OverlayMode {
         match s {
             "launcher" => Some(OverlayMode::Launcher),
             "clipboard" => Some(OverlayMode::Clipboard),
-            "actions" => Some(OverlayMode::Actions),
             _ => None,
         }
     }
@@ -115,6 +113,111 @@ impl OverlayManager {
                 let prev = capture_foreground();
                 log::info!(
                     "overlay show: captured_prev={}, elevated={}",
+                    prev.is_some(),
+                    prev.as_ref()
+                        .map(|window| window.is_elevated)
+                        .unwrap_or(false)
+                );
+                *self
+                    .prev_window
+                    .lock()
+                    .map_err(|_| AppError::Internal("lock poisoned".into()))? = prev;
+            }
+        }
+
+        // 计算位置
+        let monitor = get_cursor_monitor()?;
+        let (x, y, width, height) = calculate_overlay_position(
+            monitor.work_left,
+            monitor.work_top,
+            monitor.work_width,
+            monitor.work_height,
+            monitor.scale_factor,
+            720,
+            400,
+        );
+
+        // 设置窗口位置和大小（逻辑像素）
+        window.set_size(tauri::LogicalSize::new(width, height))?;
+        window.set_position(tauri::LogicalPosition::new(x, y))?;
+
+        // 显示窗口
+        window.show()?;
+        let _ = window.set_focus();
+
+        // 更新状态
+        let reduced_motion = self.prefers_reduced_motion_reduced();
+        *state = if reduced_motion {
+            OverlayState::Shown
+        } else {
+            OverlayState::Showing
+        };
+        *self
+            .current_mode
+            .lock()
+            .map_err(|_| AppError::Internal("lock poisoned".into()))? = Some(mode);
+
+        // 发送事件
+        let _ = window.emit("overlay://shown", mode.as_str());
+
+        // 如果有动画，延迟更新状态
+        if !reduced_motion {
+            let state_clone = Arc::clone(&self.state);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(120));
+                if let Ok(mut s) = state_clone.lock() {
+                    if *s == OverlayState::Showing {
+                        *s = OverlayState::Shown;
+                    }
+                }
+            });
+        }
+
+        Ok(())
+    }
+
+    /// 显示 WebviewWindow（用于托盘图标点击等场景）
+    pub fn show_webview(&self, window: &WebviewWindow, mode: OverlayMode) -> Result<(), AppError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AppError::Internal("lock poisoned".into()))?;
+
+        // 状态机转换
+        match *state {
+            OverlayState::Shown => {
+                // 已显示，切换语义：如果同 mode 则隐藏
+                let current = self
+                    .current_mode
+                    .lock()
+                    .map_err(|_| AppError::Internal("lock poisoned".into()))?;
+                if *current == Some(mode) {
+                    drop(state);
+                    drop(current);
+                    // 隐藏 WebviewWindow
+                    let _ = window.emit("overlay://hidden", ());
+                    window.hide()?;
+                    *self
+                        .state
+                        .lock()
+                        .map_err(|_| AppError::Internal("lock poisoned".into()))? =
+                        OverlayState::Hidden;
+                    return Ok(());
+                }
+                // 不同 mode，直接切换
+            }
+            OverlayState::Hiding => {
+                // 取消隐藏，立即显示
+            }
+            OverlayState::Showing => {
+                // 已在显示中，忽略
+                return Ok(());
+            }
+            OverlayState::Hidden => {
+                // 正常显示：capture 前台窗口
+                let prev = capture_foreground();
+                log::info!(
+                    "overlay show (webview): captured_prev={}, elevated={}",
                     prev.is_some(),
                     prev.as_ref()
                         .map(|window| window.is_elevated)

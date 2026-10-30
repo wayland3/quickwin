@@ -90,7 +90,6 @@ describe('IPC 契约', () => {
       const settings: Settings = {
         launcher_hotkey: 'Alt+Space',
         clipboard_hotkey: 'Alt+V',
-        actions_hotkey: 'Alt+X',
         retention_days: 15,
         max_items: 10000,
         record_text: true,

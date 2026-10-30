@@ -3,7 +3,7 @@
 
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
@@ -12,7 +12,6 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 pub enum HotkeyAction {
     Launcher,
     Clipboard,
-    Actions,
 }
 
 impl HotkeyAction {
@@ -20,7 +19,6 @@ impl HotkeyAction {
         match self {
             HotkeyAction::Launcher => "launcher",
             HotkeyAction::Clipboard => "clipboard",
-            HotkeyAction::Actions => "actions",
         }
     }
 }
@@ -47,6 +45,7 @@ pub struct FailedHotkey {
 pub struct HotkeyManager {
     bindings: Arc<Mutex<HashMap<HotkeyAction, String>>>,
     failed: Arc<Mutex<Vec<FailedHotkey>>>,
+    suspended: Arc<Mutex<HashSet<HotkeyAction>>>,
 }
 
 impl HotkeyManager {
@@ -54,21 +53,7 @@ impl HotkeyManager {
         Self {
             bindings: Arc::new(Mutex::new(HashMap::new())),
             failed: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    pub fn register_defaults(&self, app: &AppHandle) {
-        let defaults = vec![
-            (HotkeyAction::Launcher, "Alt+Space"),
-            (HotkeyAction::Clipboard, "Alt+V"),
-            (HotkeyAction::Actions, "Alt+X"),
-        ];
-
-        for (action, accelerator) in defaults {
-            if let Err(e) = self.register(app, action, accelerator) {
-                // 单个失败不中断其余热键注册；失败记录可由前端 hotkey_status 主动拉取
-                log::warn!("failed to register hotkey {}: {}", accelerator, e);
-            }
+            suspended: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -82,12 +67,21 @@ impl HotkeyManager {
             .parse()
             .map_err(|_| AppError::Internal(format!("invalid accelerator: {}", accelerator)))?;
 
+        let suspended_clone = self.suspended.clone();
         let result = app.global_shortcut().on_shortcut(shortcut, {
             let app_clone = app.clone();
             let action_clone = action;
             move |_app, _shortcut, event| {
                 if event.state == ShortcutState::Pressed {
-                    let _ = app_clone.emit("hotkey://pressed", action_clone.as_str());
+                    // 检查是否被暂停（录制态时避免误触发全局热键）
+                    let is_suspended = suspended_clone
+                        .lock()
+                        .ok()
+                        .map(|s| s.contains(&action_clone))
+                        .unwrap_or(false);
+                    if !is_suspended {
+                        let _ = app_clone.emit("hotkey://pressed", action_clone.as_str());
+                    }
                 }
             }
         });
@@ -247,6 +241,26 @@ impl HotkeyManager {
         Ok(())
     }
 
+    /// 暂停指定热键（录制态使用，避免误触发）
+    pub fn suspend(&self, action: HotkeyAction) -> Result<(), AppError> {
+        let mut set = self
+            .suspended
+            .lock()
+            .map_err(|_| AppError::Internal("lock poisoned".into()))?;
+        set.insert(action);
+        Ok(())
+    }
+
+    /// 恢复指定热键
+    pub fn resume(&self, action: HotkeyAction) -> Result<(), AppError> {
+        let mut set = self
+            .suspended
+            .lock()
+            .map_err(|_| AppError::Internal("lock poisoned".into()))?;
+        set.remove(&action);
+        Ok(())
+    }
+
     pub fn get_status(&self) -> Result<HotkeyStatus, AppError> {
         let bindings = self
             .bindings
@@ -296,7 +310,6 @@ mod tests {
     fn 热键动作序列化正确() {
         assert_eq!(HotkeyAction::Launcher.as_str(), "launcher");
         assert_eq!(HotkeyAction::Clipboard.as_str(), "clipboard");
-        assert_eq!(HotkeyAction::Actions.as_str(), "actions");
     }
 
     #[test]
@@ -333,5 +346,55 @@ mod tests {
             .map_err(|e| AppError::Internal(format!("bindings lock: {}", e)))
             .unwrap_or_fail("bindings lock");
         assert_eq!(value, Some("Alt+V".to_string()));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 暂停与恢复热键() {
+        let manager = HotkeyManager::new();
+
+        // 初始状态：未暂停
+        let suspended = manager.suspended.lock().unwrap();
+        assert!(!suspended.contains(&HotkeyAction::Launcher));
+        drop(suspended);
+
+        // 暂停
+        manager
+            .suspend(HotkeyAction::Launcher)
+            .unwrap_or_fail("suspend");
+        let suspended = manager.suspended.lock().unwrap();
+        assert!(suspended.contains(&HotkeyAction::Launcher));
+        drop(suspended);
+
+        // 恢复
+        manager
+            .resume(HotkeyAction::Launcher)
+            .unwrap_or_fail("resume");
+        let suspended = manager.suspended.lock().unwrap();
+        assert!(!suspended.contains(&HotkeyAction::Launcher));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 重复暂停幂等() {
+        let manager = HotkeyManager::new();
+
+        manager
+            .suspend(HotkeyAction::Clipboard)
+            .unwrap_or_fail("suspend 1");
+        manager
+            .suspend(HotkeyAction::Clipboard)
+            .unwrap_or_fail("suspend 2");
+
+        let suspended = manager.suspended.lock().unwrap();
+        assert!(suspended.contains(&HotkeyAction::Clipboard));
+        drop(suspended);
+
+        // 一次恢复即可
+        manager
+            .resume(HotkeyAction::Clipboard)
+            .unwrap_or_fail("resume");
+        let suspended = manager.suspended.lock().unwrap();
+        assert!(!suspended.contains(&HotkeyAction::Clipboard));
     }
 }
