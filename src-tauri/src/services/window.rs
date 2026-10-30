@@ -2,7 +2,8 @@
 
 use crate::error::AppError;
 use crate::platform::focus::{
-    calculate_overlay_position, capture_foreground, get_cursor_monitor, restore, ForegroundWindow,
+    calculate_overlay_position, capture_foreground, get_cursor_monitor, release_stuck_modifiers,
+    restore, ForegroundWindow,
 };
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
@@ -112,6 +113,13 @@ impl OverlayManager {
             OverlayState::Hidden => {
                 // 正常显示：capture 前台窗口
                 let prev = capture_foreground();
+                log::info!(
+                    "overlay show: captured_prev={}, elevated={}",
+                    prev.is_some(),
+                    prev.as_ref()
+                        .map(|window| window.is_elevated)
+                        .unwrap_or(false)
+                );
                 *self
                     .prev_window
                     .lock()
@@ -209,7 +217,9 @@ impl OverlayManager {
                 if let Some(prev) = self.prev_window.lock().ok().and_then(|p| p.clone()) {
                     // spawn_blocking 执行恢复，避免阻塞 async runtime
                     let _ = std::thread::spawn(move || {
-                        let _ = restore(&prev, 150);
+                        if restore(&prev, 150).is_ok() {
+                            release_stuck_modifiers(&prev);
+                        }
                     });
                 }
             }
@@ -231,7 +241,9 @@ impl OverlayManager {
                 // 恢复焦点
                 if reason == HideReason::UserCommand {
                     if let Some(prev) = prev_window {
-                        let _ = restore(&prev, 150);
+                        if restore(&prev, 150).is_ok() {
+                            release_stuck_modifiers(&prev);
+                        }
                     }
                 }
             });
@@ -260,16 +272,22 @@ impl OverlayManager {
         std::thread::sleep(std::time::Duration::from_millis(20));
 
         let prev = self.prev_window.lock().ok().and_then(|p| p.clone());
-        match prev {
+        let outcome = match prev {
             None => RestoreOutcome::NoTarget,
             Some(prev) => match restore(&prev, 150) {
-                Ok(()) => RestoreOutcome::Restored,
+                Ok(()) => {
+                    // 目标线程可能在 Alt 按下时失去焦点，补发卡住的修饰键 KEYUP
+                    release_stuck_modifiers(&prev);
+                    RestoreOutcome::Restored
+                }
                 Err(e) => {
                     log::warn!("hide_for_paste: restore failed: {}", e);
                     RestoreOutcome::Failed
                 }
             },
-        }
+        };
+        log::info!("hide_for_paste: outcome={:?}", outcome);
+        outcome
     }
 
     /// 降级时重新展示剪贴板面板（不重新 capture，保留 prev_window）

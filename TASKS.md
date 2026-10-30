@@ -410,6 +410,14 @@
   历史无新增/无重排；连续 5 条互不串；管理员窗口降级；关闭目标窗口后 restore 降级；
   还原开关开启后 300ms 恢复原剪贴板且不重排
 
+**修复（2026-10-30，真机反馈）**：
+- 现象：`Enter` 不粘贴只提示「已复制」；之后点击其他应用第一下无效；`Esc`/点击外部不退出
+- 根因与修复见 `docs/reviews/T-205-fix.md`：`restore` 误把 `AttachThreadInput` 失败当提权拒绝、
+  目标线程 Alt 状态卡住（补发 KEYUP）、失焦隐藏未接 `on_window_event`、提权同名进程允许粘贴
+- 用户已真机确认三项均正常；`verify` 全绿（131 Rust / 4 ignored、53 前端）
+- 交叉评审：GLM-5.3 PASS（L2，1 轮），详见 `docs/reviews/T-205-fix.md`
+- 遗留（NONBLOCK）：`Showing` 动画期失焦忽略；`hide` 恢复不持粘贴锁；KEYUP 为全局注入
+
 ### [x] [L1] T-206 保留策略与容量治理（2026-10-29）
 - TTL 15 天，按 `last_copied_at`；置顶豁免
 - 上限：10,000 条 / 单文本 256KB / 单图 8MB / blob 总量 500MB

@@ -106,6 +106,13 @@ fn get_process_name(pid: u32) -> Option<String> {
     Some(name)
 }
 
+/// 检测当前进程是否提权（用于 UIPI 判断：同权限或更高权限才允许注入）
+pub fn current_process_elevated() -> bool {
+    // SAFETY: GetCurrentProcessId 无参数
+    let pid = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
+    check_elevated(pid)
+}
+
 /// 检测进程是否提权（TokenElevation 为主）
 fn check_elevated(pid: u32) -> bool {
     // SAFETY: OpenProcess 是安全的 Win32 调用
@@ -209,7 +216,51 @@ impl Drop for ThreadInputGuard {
     }
 }
 
-/// 恢复焦点到之前窗口
+/// 恢复焦点后清理目标线程里「卡住」的修饰键
+///
+/// 原因：按 `Alt+V` 呼出面板时，Alt 的 keydown 发给了目标窗口线程，
+/// keyup 却发给了浮层线程；切回焦点后目标线程仍认为 Alt 处于按下状态，
+/// 会进入菜单模式导致后续点击被吞掉。这里附加到目标线程读取其键盘状态，
+/// 只对真正处于按下状态的修饰键补发 KEYUP。
+pub fn release_stuck_modifiers(prev: &ForegroundWindow) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetKeyboardState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+        VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    };
+
+    let hwnd = HWND(prev.hwnd as *mut _);
+    let Ok(_guard) = ThreadInputGuard::attach(hwnd) else {
+        return;
+    };
+
+    let mut state = [0u8; 256];
+    // SAFETY: 已附加到目标线程，GetKeyboardState 读取共享的线程键盘状态
+    if unsafe { GetKeyboardState(&mut state) }.is_err() {
+        return;
+    }
+
+    let modifiers = [VK_MENU, VK_CONTROL, VK_SHIFT, VK_LWIN, VK_RWIN];
+    for vk in modifiers {
+        if state[vk.0 as usize] & 0x80 == 0 {
+            continue;
+        }
+        let input = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(vk.0),
+                    wScan: 0,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        // SAFETY: input 为有效 INPUT 结构
+        let _ = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+        log::info!("focus: released stuck modifier vk={}", vk.0);
+    }
+}
 pub fn restore(prev: &ForegroundWindow, timeout_ms: u32) -> Result<(), AppError> {
     let hwnd = HWND(prev.hwnd as *mut _);
 
@@ -220,52 +271,47 @@ pub fn restore(prev: &ForegroundWindow, timeout_ms: u32) -> Result<(), AppError>
         return Err(AppError::Internal("window no longer exists".into()));
     }
 
-    // 重试 3 次
+    // 重试 3 次：先直接抢焦点（隐藏自己的窗口后本进程仍持有前台权限，
+    // 通常一次即可）；失败再 AttachThreadInput 后重试
     for _ in 0..3 {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // 附加线程输入
-            let _guard = ThreadInputGuard::attach(hwnd)?;
+        // 最小化时先恢复
+        if prev.is_minimized {
+            // SAFETY: hwnd 已通过 IsWindow 校验
+            let _ = unsafe { ShowWindow(hwnd, SW_RESTORE) };
+        }
 
-            // 如果最小化，恢复窗口
-            if prev.is_minimized {
-                // SAFETY: hwnd 有效
-                let _ = unsafe { ShowWindow(hwnd, SW_RESTORE) };
-            }
+        // SAFETY: hwnd 已通过 IsWindow 校验
+        let direct = unsafe { SetForegroundWindow(hwnd) };
 
-            // 设置前台窗口
-            // SAFETY: hwnd 有效
-            let set_fg_result = unsafe { SetForegroundWindow(hwnd) };
-            if set_fg_result == FALSE {
-                return Err(AppError::Internal("SetForegroundWindow failed".into()));
-            }
-
-            // 设置焦点（优先子窗口）
-            if let Some(child) = prev.focus_child {
-                let child_hwnd = HWND(child as *mut _);
-                // SAFETY: child_hwnd 可能无效
-                let child_valid = unsafe { IsWindow(child_hwnd) };
-                if child_valid == TRUE {
-                    let _ = unsafe { SetFocus(child_hwnd) };
+        if direct == FALSE {
+            // SAFETY: 成对调用由 Guard 管理；附加失败不阻断后续直接重试
+            if let Ok(_guard) = ThreadInputGuard::attach(hwnd) {
+                if prev.is_minimized {
+                    // SAFETY: hwnd 有效
+                    let _ = unsafe { ShowWindow(hwnd, SW_RESTORE) };
                 }
-            }
-
-            // 校验
-            // SAFETY: GetForegroundWindow 无参数
-            let current = unsafe { GetForegroundWindow() };
-            if current != hwnd {
-                return Err(AppError::Internal("focus not restored".into()));
-            }
-
-            Ok(())
-        }));
-
-        match result {
-            Ok(Ok(())) => return Ok(()),
-            Ok(Err(AppError::ElevatedTarget)) => return Err(AppError::ElevatedTarget),
-            _ => {
-                std::thread::sleep(std::time::Duration::from_millis((timeout_ms / 3) as u64));
+                // SAFETY: hwnd 有效
+                let _ = unsafe { SetForegroundWindow(hwnd) };
             }
         }
+
+        // 焦点子窗口：跨进程可能失败，失败不影响顶级窗口激活
+        if let Some(child) = prev.focus_child {
+            let child_hwnd = HWND(child as *mut _);
+            // SAFETY: child_hwnd 可能无效
+            if unsafe { IsWindow(child_hwnd) } == TRUE {
+                let _ = unsafe { SetFocus(child_hwnd) };
+            }
+        }
+
+        // 校验
+        // SAFETY: GetForegroundWindow 无参数
+        let current = unsafe { GetForegroundWindow() };
+        if current == hwnd {
+            return Ok(());
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis((timeout_ms / 3) as u64));
     }
 
     Err(AppError::Internal("focus restore timeout".into()))

@@ -70,6 +70,16 @@ pub fn run() {
         .manage(HotkeyManager::new())
         .manage(services::paste::PasteOptions::new())
         .manage(services::appindex::IndexRebuildLock::default())
+        .on_window_event(|window, event| {
+            // 点击其他窗口（失焦）即隐藏浮层；Esc 由前端监听统一处理
+            if window.label() == "overlay" && matches!(event, tauri::WindowEvent::Focused(false)) {
+                log::info!("overlay lost focus, hiding");
+                let manager = window.state::<OverlayManager>();
+                if let Err(error) = manager.on_blur(window) {
+                    log::warn!("overlay blur hide failed: {}", error);
+                }
+            }
+        })
         .setup(|app| {
             log::info!("QuickWin starting");
             services::tray::setup_tray(app.handle())?;

@@ -6,6 +6,7 @@
 use crate::error::AppError;
 use crate::models::{ClipboardDetail, PasteMode};
 use crate::platform::clipboard::{write_clipboard_content, ClipboardContent, ImageFormat};
+use crate::platform::focus::current_process_elevated;
 use crate::platform::focus::ForegroundWindow;
 use crate::platform::input::send_paste;
 use crate::services::clipboard::PasteSuppression;
@@ -64,16 +65,28 @@ pub fn activate(
         .map_err(|_| AppError::Internal("粘贴操作正在进行，请稍候".into()))?;
 
     if mode == PasteMode::Copy {
+        log::info!("paste: copy id={}", detail.id);
         write_with_suppression(suppression, &content, hash)?;
         emit_toast(app, "已复制");
         return Ok(());
     }
 
+    log::info!("paste: start id={}", detail.id);
     let prev = manager.prev_window();
-    let prev = match prev {
-        Some(prev) if !prev.is_elevated => Some(prev),
-        _ => None,
-    };
+    let allowed = prev
+        .as_ref()
+        .map(|window| !window.is_elevated || current_process_elevated())
+        .unwrap_or(false);
+    log::info!(
+        "paste: prev_present={}, prev_elevated={}, self_elevated={}, allowed={}",
+        prev.is_some(),
+        prev.as_ref()
+            .map(|window| window.is_elevated)
+            .unwrap_or(false),
+        current_process_elevated(),
+        allowed
+    );
+    let prev = if allowed { prev } else { None };
 
     // 没有可恢复的目标（未捕获 / 提权）：不隐藏、不发键，只保证剪贴板可用
     let restored = match (&window, &prev) {
@@ -104,15 +117,21 @@ pub fn activate(
     };
 
     if !restored {
+        log::info!("paste: restore failed, fallback to copy");
         resume_and_toast(app, manager, &window, "已复制，请手动粘贴");
         return Ok(());
     }
 
+    // 焦点恢复后给系统一点时间完成前台激活，再发送按键
+    std::thread::sleep(std::time::Duration::from_millis(30));
+
     if let Err(e) = send_paste() {
-        log::warn!("send_paste failed: {}", e);
+        log::info!("paste: send_ctrl_v failed: {}", e);
         resume_and_toast(app, manager, &window, "已复制，请手动粘贴");
         return Ok(());
     }
+
+    log::info!("paste: sent ctrl+v");
 
     if let Some((snapshot, snapshot_hash)) = snapshot {
         schedule_restore(
