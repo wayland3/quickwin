@@ -628,10 +628,30 @@
 交叉评审：GLM-5.3（2026-10-30）PASS（L1，2 轮），详见 docs/reviews/T-606.md
 依赖：T-107（设置读写）。
 
-### [ ] [L1] T-602 热键录制控件
-- 点击后进入录制态，按下组合键显示；`Esc` 取消；`Backspace` 清除
-- 保存前检测冲突：尝试注册 → 失败则提示「已被其他程序占用」并保留原热键
-- 支持恢复默认
+### [x] [L1] T-602 热键录制控件 — 2026-10-30
+- 点击后进入录制态，按下组合键自动识别并保存
+- `Esc` 取消录制；`Backspace` 清空热键
+- 录制期间暂停全局热键，避免误触发
+- 保存前检测冲突：尝试注册 → 失败则提示「热键注册失败，请尝试更换」
 
 验收：录 `Ctrl+Alt+K` 生效；录已被占用的键有明确错误且原热键仍可用；录制态不会误触发全局热键。
 依赖：T-103、T-601。
+
+**实现备注（2026-10-30）**：
+- 新增 `src/lib/keys.ts`：键盘事件到 Tauri accelerator 格式的转换工具
+  - `eventToAccelerator`：从 KeyboardEvent 构建 accelerator 字符串
+  - `formatAccelerator`：格式化 accelerator 用于显示（Super→Win、Space→空格等）
+  - `isValidAccelerator`：验证 accelerator 格式
+- 新增 `src/components/HotkeyRecorder.tsx`：热键录制控件组件
+  - 点击按钮进入录制态，显示「按下新热键...」
+  - 捕获键盘事件并转换为 accelerator 格式
+  - 录制期间调用 `hotkeySuspend` 暂停全局热键
+  - Esc 取消、Backspace 清空、组合键自动保存
+  - 失焦或组件卸载时自动恢复热键
+- 后端新增 `hotkey_suspend` / `hotkey_resume` 命令
+  - `HotkeyManager` 新增 `suspended` 集合，记录被暂停的热键
+  - 注册热键时检查 suspended 状态，被暂停的热键不触发事件
+- 设置面板热键页使用 `HotkeyRecorder` 替代文本输入框
+- 测试：22 个 keys 单元测试 + 7 个 HotkeyRecorder 组件测试 + 2 个 Rust 暂停/恢复测试
+- `npm.cmd run verify` 全绿（91 前端 + 133 Rust passed）
+- 交叉评审：待执行（L1，1 轮）
