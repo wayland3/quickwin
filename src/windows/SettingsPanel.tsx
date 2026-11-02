@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ipc } from '../lib/ipc';
+import type { HotkeyProbeResult } from '../lib/ipc';
 import type { Settings } from '../lib/clipboard';
 import { HotkeyRecorder } from '../components/HotkeyRecorder';
 
@@ -223,6 +224,7 @@ function HotkeysTab({
             <div className="mt-1 text-xs text-[var(--text-muted)]">
               打开应用启动器
             </div>
+            <HotkeyAvailability accelerator={settings.launcher_hotkey} />
           </div>
           <HotkeyRecorder
             value={settings.launcher_hotkey}
@@ -239,6 +241,7 @@ function HotkeysTab({
             <div className="mt-1 text-xs text-[var(--text-muted)]">
               打开剪贴板历史面板
             </div>
+            <HotkeyAvailability accelerator={settings.clipboard_hotkey} />
           </div>
           <HotkeyRecorder
             value={settings.clipboard_hotkey}
@@ -252,7 +255,76 @@ function HotkeysTab({
         <div className="rounded-lg bg-blue-500/10 px-4 py-3 text-xs text-blue-600">
           提示：点击按钮后按下组合键即可录制。按 Esc 取消，按 Backspace 清空。
         </div>
+        <div className="rounded-lg bg-blue-500/10 px-4 py-3 text-xs text-blue-600">
+          含 Win 键的组合（如 Win+空格）也可以录制：按住 Win 再按主键即可，
+          录制过程中系统可能短暂切走焦点，属正常现象。
+        </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * 热键可用性实测结果
+ *
+ * 进入热键页时自动探测一次；点击「重新检测」可再次探测。
+ * 探测的是「该组合键此刻能否被注册」，用来区分：
+ * - 当前可用
+ * - 已被系统或其他程序占用（如桌面环境的 Win+空格）
+ * - 格式无效
+ */
+function HotkeyAvailability({ accelerator }: { accelerator: string }) {
+  const [result, setResult] = useState<HotkeyProbeResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  const check = useCallback(async () => {
+    setChecking(true);
+    setError(null);
+    try {
+      const r = await ipc.hotkeyProbe(accelerator);
+      setResult(r);
+    } catch (err) {
+      // 探测环境故障：后端直接报错，这里展示可操作的中文提示
+      setResult(null);
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setChecking(false);
+    }
+  }, [accelerator]);
+
+  // 进入页面自动探测一次；accelerator 变化时重新探测。
+  // useEffect 依赖 [check]，check 依赖 [accelerator]，因此 accelerator 变化才触发，
+  // 不会形成循环（check 内部只 setState，不改 accelerator）。
+  useEffect(() => {
+    if (!accelerator) return;
+    void check();
+  }, [check, accelerator]);
+
+  if (!accelerator) {
+    return null;
+  }
+
+  const tone = error
+    ? 'text-red-500'
+    : result?.reason === 'available'
+      ? 'text-green-600'
+      : 'text-red-500';
+
+  return (
+    <div className="mt-1 flex items-center gap-2 text-xs">
+      {checking ? (
+        <span className="text-[var(--text-muted)]">检测中...</span>
+      ) : (
+        <span className={tone}>{error ?? result?.message ?? '无法检测'}</span>
+      )}
+      <button
+        type="button"
+        onClick={() => void check()}
+        className="text-[var(--text-muted)] underline hover:text-[var(--text)]"
+      >
+        重新检测
+      </button>
     </div>
   );
 }

@@ -7,6 +7,14 @@ import type {
 } from './clipboard';
 import type { AppIndexRebuildResult, LauncherQueryResult } from './launcher';
 
+/** 热键可用性实测结果（对应 Rust `HotkeyProbeResult`） */
+export interface HotkeyProbeResult {
+  accelerator: string;
+  available: boolean;
+  reason: 'available' | 'occupied' | 'invalid';
+  message: string;
+}
+
 /** 后端错误结构 */
 interface AppError {
   code: string;
@@ -34,6 +42,14 @@ function handleError(err: unknown, command?: string): never {
     // 打开应用失败：后端文案已按原因分类（已卸载 / 无权限 / 无关联程序），直接展示
     if (
       appError.code === 'launcher.launch_failed' &&
+      typeof appError.message === 'string' &&
+      appError.message
+    ) {
+      throw new Error(appError.message);
+    }
+    // 热键探测失败：后端已给出可操作的中文原因，直接展示
+    if (
+      appError.code === 'hotkey.probe_failed' &&
       typeof appError.message === 'string' &&
       appError.message
     ) {
@@ -94,6 +110,11 @@ export const ipc = {
     failed: Array<{ action: string; accelerator: string; code: string }>;
   }> {
     return invokeWrapper('hotkey_status');
+  },
+
+  /** 实测某组合键当前是否可用（可用 / 被占用 / 格式无效） */
+  async hotkeyProbe(accelerator: string): Promise<HotkeyProbeResult> {
+    return invokeWrapper<HotkeyProbeResult>('hotkey_probe', { accelerator });
   },
 
   async hotkeyRebind(

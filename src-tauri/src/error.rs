@@ -21,6 +21,10 @@ pub enum AppError {
     #[error("热键注册失败，请尝试更换")]
     HotkeyRegisterFailed,
 
+    /// 热键可用性探测失败（探测环境不可用，非「被占用」）
+    #[error("{0}")]
+    HotkeyProbeFailed(String),
+
     #[error("数据库操作失败")]
     Storage(String),
 
@@ -60,6 +64,7 @@ impl Serialize for AppError {
                 ("hotkey.conflict", format!("热键 {} 已被其他程序占用", key))
             }
             AppError::HotkeyRegisterFailed => ("hotkey.register_failed", self.to_string()),
+            AppError::HotkeyProbeFailed(reason) => ("hotkey.probe_failed", reason.clone()),
             AppError::Storage(_) => ("storage.error", self.to_string()),
             AppError::SettingsInvalid(reason) => {
                 ("settings.invalid", format!("设置不合法：{}", reason))

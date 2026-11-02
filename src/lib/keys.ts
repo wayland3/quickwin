@@ -81,6 +81,20 @@ export function eventToAccelerator(event: KeyboardEvent): string | null {
 }
 
 /**
+ * 判断当前键盘事件中是否有修饰键处于按下状态
+ *
+ * 用于热键录制：按 Win/Super 键会唤起系统开始菜单或桌面 Activities，
+ * 导致窗口失焦。若失焦时修饰键仍按住，说明用户正在录入含该修饰键的组合，
+ * 此时不应退出录制态。
+ *
+ * @param event 键盘事件
+ * @returns 是否有修饰键按住
+ */
+export function isModifierHeld(event: KeyboardEvent): boolean {
+  return event.ctrlKey || event.altKey || event.shiftKey || event.metaKey;
+}
+
+/**
  * 格式化 accelerator 字符串用于显示
  *
  * @param accelerator Tauri accelerator 字符串

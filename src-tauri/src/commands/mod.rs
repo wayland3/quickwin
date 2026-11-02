@@ -3,7 +3,7 @@ pub mod launcher;
 pub mod settings;
 
 use crate::error::AppError;
-use crate::services::hotkey::{HotkeyAction, HotkeyManager, HotkeyStatus};
+use crate::services::hotkey::{HotkeyAction, HotkeyManager, HotkeyProbeResult, HotkeyStatus};
 use crate::services::window::{
     HideReason, OverlayManager, OverlayMode, ResizePayload, ShowPayload,
 };
@@ -68,6 +68,22 @@ pub async fn overlay_resize(window: Window, payload: ResizePayload) -> Result<()
 pub async fn hotkey_status(window: Window) -> Result<HotkeyStatus, AppError> {
     let hotkey_manager = window.state::<HotkeyManager>();
     hotkey_manager.get_status()
+}
+
+/// 实测某个组合键当前是否可用
+///
+/// 返回「可用 / 被占用 / 格式无效」的结论；探测环境故障则返回 `Err`。
+///
+/// 探测是阻塞操作（底层要同步注册/注销全局热键），因此本 command 是**同步**的：
+/// Tauri 会把它放到专用线程执行，不占用异步运行时的工作线程，
+/// 也不会在 async 上下文里做阻塞调用（见 `docs/CODING-STANDARDS.md`）。
+#[tauri::command]
+pub fn hotkey_probe(
+    app: tauri::AppHandle,
+    accelerator: String,
+) -> Result<HotkeyProbeResult, AppError> {
+    let hotkey_manager = app.state::<HotkeyManager>();
+    hotkey_manager.probe(&accelerator)
 }
 
 #[tauri::command]

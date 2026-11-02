@@ -375,3 +375,39 @@ UI-SPEC §10 禁止 base64 内联；Tauri 2 提供 asset 自定义协议。
 
 **验证（L0 自验）**：`npm.cmd run verify` 全绿（135 Rust / 4 ignored、56 前端）；
 前端已无 `web` 类型与网页分组，Rust 无 `with_web_fallback` / `LauncherKind::Web` 残留。
+---
+
+## ADR-0017 直接依赖 `global-hotkey` 以获得类型化热键错误
+
+**状态**：已采纳（2026-11-02，用户确认）
+
+**背景**：T-607 需要在设置页实测「某个组合键当前是否可用」。要精确区分两种情况：
+
+- **被占用**：该组合键已被系统或其他程序 grab（Windows 上 `RegisterHotKey` 返回 `ERROR_HOTKEY_ALREADY_REGISTERED`；X11 上 `grab_key` 返回 `Access` 错误）
+- **探测失败**：探测环境本身不可用（X11 连接断开、权限不足等）
+
+现有依赖 `tauri-plugin-global-shortcut` 把底层 `global_hotkey::Error` 降级成了扁平字符串
+（`Error::GlobalHotkey(String)`），两种情况混在一起，只能靠匹配英文错误文案来区分
+（`"HotKey already registered"`），上游改文案即失效。
+
+**决策**：在 `src-tauri/Cargo.toml` 中把 `global-hotkey = "0.8"` 声明为**直接依赖**，
+热键探测改用 `global_hotkey::GlobalHotKeyManager` + 类型化的 `Error::AlreadyRegistered`。
+
+**理由**：
+
+- `global-hotkey` 本就是 `tauri-plugin-global-shortcut` 的传递依赖，版本完全一致（0.8.0），
+  **不引入新包、不增加编译量、不改变依赖树**；
+- 标准库与既有依赖（插件）都无法提供类型化的「已被占用」信号 —— 插件已经把它拍平了；
+- 字符串匹配错误文案是脆弱耦合，且本项目要求错误信息稳定可预期。
+
+**代价**：
+
+- 多一条直接依赖边，需在实现备注中说明理由；
+- 探测逻辑绕过插件，直接用底层 crate，与运行时绑定使用不同的 manager
+  （因此探测不会与运行时绑定互相干扰，见 T-607 实现备注）。
+
+**替代方案**：
+
+- 匹配插件错误字符串前缀：零新增依赖，但耦合上游英文文案，改动即失效；
+- 只在「注册成功/失败」二分，不区分占用与故障：用户会看到误导性提示
+  （例如 X11 断开时提示「已被其他程序占用」）。

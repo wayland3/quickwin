@@ -6,6 +6,7 @@ import type {
   Settings,
 } from './clipboard';
 import type { AppIndexRebuildResult, LauncherItem, LauncherQueryResult } from './launcher';
+import type { HotkeyProbeResult } from './ipc';
 
 import ClipboardItemKeys from './contract/ClipboardItem.keys.json';
 import ClipboardDetailKeys from './contract/ClipboardDetail.keys.json';
@@ -14,6 +15,7 @@ import SettingsKeys from './contract/Settings.keys.json';
 import AppIndexRebuildResultKeys from './contract/AppIndexRebuildResult.keys.json';
 import LauncherItemKeys from './contract/LauncherItem.keys.json';
 import LauncherQueryResultKeys from './contract/LauncherQueryResult.keys.json';
+import HotkeyProbeResultKeys from './contract/HotkeyProbeResult.keys.json';
 
 /**
  * IPC 契约测试
@@ -138,6 +140,20 @@ describe('IPC 契约', () => {
 
       const keys = Object.keys(result).sort();
       expect(keys).toEqual(LauncherQueryResultKeys.sort());
+    });
+  });
+
+  describe('HotkeyProbeResult 字段集合', () => {
+    it('与 Rust 序列化一致', () => {
+      const result: HotkeyProbeResult = {
+        accelerator: 'Super+Space',
+        available: true,
+        reason: 'available',
+        message: '当前可用',
+      };
+
+      const keys = Object.keys(result).sort();
+      expect(keys).toEqual(HotkeyProbeResultKeys.sort());
     });
   });
 });

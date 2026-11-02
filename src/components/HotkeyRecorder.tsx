@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { eventToAccelerator } from '../lib/keys';
+import { eventToAccelerator, isModifierHeld } from '../lib/keys';
 import { ipc } from '../lib/ipc';
 
 interface HotkeyRecorderProps {
@@ -30,6 +30,8 @@ export function HotkeyRecorder({
   const [isRecording, setIsRecording] = useState(false);
   const [draft, setDraft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** 录制期间是否有修饰键按住（用于失焦时判定是否退出录制） */
+  const [modifierHeld, setModifierHeld] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
 
   // 进入录制态
@@ -37,6 +39,7 @@ export function HotkeyRecorder({
     setIsRecording(true);
     setDraft(null);
     setError(null);
+    setModifierHeld(false);
 
     // 暂停全局热键，避免录制时误触发
     try {
@@ -53,6 +56,7 @@ export function HotkeyRecorder({
   const stopRecording = useCallback(async () => {
     setIsRecording(false);
     setDraft(null);
+    setModifierHeld(false);
 
     // 恢复全局热键
     try {
@@ -108,6 +112,9 @@ export function HotkeyRecorder({
         return;
       }
 
+      // 记录当前按下的修饰键，供失焦判定使用
+      setModifierHeld(isModifierHeld(event.nativeEvent));
+
       // 尝试构建 accelerator
       const accelerator = eventToAccelerator(event.nativeEvent);
       if (accelerator) {
@@ -118,12 +125,37 @@ export function HotkeyRecorder({
     [isRecording, stopRecording, clearHotkey, saveHotkey],
   );
 
+  // 键盘事件抬起：更新修饰键状态
+  //
+  // 兜底：修饰键松开时退出录制态。
+  // - 只按了 Win 就松手（没录到组合键）→ 退出，避免停在录制态
+  // - 录到了但保存失败 → 也退出，让用户看到错误并决定下一步
+  //   （错误信息在退出后依然显示，用户可重新点击录制）
+  //
+  // 用 ref 而不是 draft 判断是否录到过：draft 在保存失败时仍有值，
+  // 若以 draft 为准就会永远停在录制态（修饰键已松开，不再有 keyup 触发）。
+  const handleKeyUp = useCallback(
+    (event: React.KeyboardEvent) => {
+      if (!isRecording) return;
+      const stillHeld = isModifierHeld(event.nativeEvent);
+      setModifierHeld(stillHeld);
+      if (!stillHeld) {
+        stopRecording();
+      }
+    },
+    [isRecording, stopRecording],
+  );
+
   // 失焦时退出录制态
+  //
+  // 例外：修饰键仍按住时不退出。按 Win/Super 键会唤起系统开始菜单或桌面
+  // Activities，导致窗口失焦；若此时退出录制，用户就再也录不进 `Win+空格`
+  // 这类组合。修饰键松开后若仍未录到组合键，由 keyup 兜底退出录制态。
   const handleBlur = useCallback(() => {
-    if (isRecording) {
-      stopRecording();
-    }
-  }, [isRecording, stopRecording]);
+    if (!isRecording) return;
+    if (modifierHeld) return;
+    stopRecording();
+  }, [isRecording, modifierHeld, stopRecording]);
 
   // 组件卸载时确保恢复热键
   useEffect(() => {
@@ -148,6 +180,7 @@ export function HotkeyRecorder({
         type="button"
         onClick={startRecording}
         onKeyDown={handleKeyDown}
+        onKeyUp={handleKeyUp}
         onBlur={handleBlur}
         className={`rounded-lg border px-3 py-1.5 text-sm transition-colors focus:outline-none ${
           isRecording

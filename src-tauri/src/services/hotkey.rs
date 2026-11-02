@@ -2,6 +2,7 @@
 // 统一入口，业务侧只订阅动作事件
 
 use crate::error::AppError;
+use global_hotkey::GlobalHotKeyManager;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -40,6 +41,34 @@ pub struct FailedHotkey {
     pub action: HotkeyAction,
     pub accelerator: String,
     pub code: String,
+}
+
+/// 热键可用性实测结果
+///
+/// 探测方式：用**独立**的 `global_hotkey::GlobalHotKeyManager` 尝试注册该组合键。
+/// 独立 manager 与运行时绑定（走 `tauri-plugin-global-shortcut`）互不干扰，
+/// 因此探测不会与已注册的热键冲突，探测结束后组合键立即释放。
+///
+/// - `available`：注册成功（探测后立即注销）
+/// - `occupied`：已被系统或其他程序占用
+/// - `invalid`：accelerator 格式非法
+///
+/// **探测本身失败**（如 X11 连接断开、权限不足）不属于结论，直接返回 `Err`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HotkeyProbeReason {
+    Available,
+    Occupied,
+    Invalid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotkeyProbeResult {
+    pub accelerator: String,
+    pub available: bool,
+    pub reason: HotkeyProbeReason,
+    /// 面向用户的中文说明
+    pub message: String,
 }
 
 pub struct HotkeyManager {
@@ -287,6 +316,108 @@ impl HotkeyManager {
     }
 }
 
+/// 校验 accelerator 是否可解析（纯逻辑，便于单测）
+///
+/// 返回 `Ok(shortcut)` 或 `Err(中文原因)`。
+fn parse_shortcut(accelerator: &str) -> Result<Shortcut, String> {
+    let trimmed = accelerator.trim();
+    if trimmed.is_empty() {
+        return Err("热键未设置".to_string());
+    }
+    trimmed
+        .parse::<Shortcut>()
+        .map_err(|_| format!("{} 不是有效的组合键", trimmed))
+}
+
+/// 实测某个 accelerator 当前是否可用
+///
+/// 实测方式：用**独立**的 `global_hotkey::GlobalHotKeyManager` 尝试注册该组合键，
+/// 再立即注销。独立 manager 与运行时绑定（走 `tauri-plugin-global-shortcut`）
+/// 是两套实例，因此探测不会干扰运行时已注册的热键，探测结束后组合键立即释放。
+///
+/// 结论与错误的分界：
+/// - 组合键被别的程序占用 → `Ok(reason: Occupied)`（这是**结论**，不是错误）
+/// - 组合键格式非法 → `Ok(reason: Invalid)`（这是**结论**）
+/// - 探测环境不可用（X11 连接断开、权限不足等）→ `Err(AppError)`（这是**失败**）
+///
+/// **自身绑定的特殊处理**：独立 manager 与运行时绑定是两套实例，但底层 OS 的
+/// 全局热键表是**同一份**——运行时已注册的组合键，在探测时同样会返回
+/// `AlreadyRegistered`。这不是「被别人占用」，而是「本应用自己占用」，
+/// 因此必须先比对自身绑定，否则用户会看到自己正在用的热键被标红为「被占用」。
+///
+/// 探测是阻塞操作（底层要同步注册/注销全局热键），因此本函数是同步的，
+/// 调用方必须放到专用线程（见 `commands::hotkey_probe`）。
+impl HotkeyManager {
+    pub fn probe(&self, accelerator: &str) -> Result<HotkeyProbeResult, AppError> {
+        let trimmed = accelerator.trim();
+
+        let shortcut = match parse_shortcut(trimmed) {
+            Ok(s) => s,
+            Err(reason) => {
+                return Ok(HotkeyProbeResult {
+                    accelerator: trimmed.to_string(),
+                    available: false,
+                    reason: HotkeyProbeReason::Invalid,
+                    message: reason,
+                });
+            }
+        };
+
+        // 独立 manager：与运行时绑定是两套实例，但底层 OS 全局热键表是同一份，
+        // 因此运行时已注册的组合键在探测时也会返回 AlreadyRegistered。
+        // 先比对自身绑定，把「自己占用」与「被别人占用」区分开。
+        if self.is_bound(trimmed) {
+            return Ok(HotkeyProbeResult {
+                accelerator: trimmed.to_string(),
+                available: true,
+                reason: HotkeyProbeReason::Available,
+                message: "当前可用（本应用已绑定）".to_string(),
+            });
+        }
+
+        let manager = GlobalHotKeyManager::new()
+            .map_err(|e| AppError::HotkeyProbeFailed(format!("无法检测热键占用：{}", e)))?;
+
+        match manager.register(shortcut) {
+            Ok(_) => {
+                // 探测成功立刻释放，避免长期占用该组合键
+                let _ = manager.unregister(shortcut);
+                Ok(HotkeyProbeResult {
+                    accelerator: trimmed.to_string(),
+                    available: true,
+                    reason: HotkeyProbeReason::Available,
+                    message: "当前可用".to_string(),
+                })
+            }
+            // 已被系统或其他程序占用：这是结论，不是错误
+            Err(global_hotkey::Error::AlreadyRegistered(_)) => Ok(HotkeyProbeResult {
+                accelerator: trimmed.to_string(),
+                available: false,
+                reason: HotkeyProbeReason::Occupied,
+                message: format!("{} 已被系统或其他程序占用", trimmed),
+            }),
+            // 其余均为探测环境故障：直接报错
+            Err(e) => Err(AppError::HotkeyProbeFailed(format!(
+                "无法检测热键占用：{}",
+                e
+            ))),
+        }
+    }
+
+    /// 判断某个 accelerator 是否是本应用当前已注册的绑定
+    ///
+    /// 两边都做 `trim` 后比较：`bindings` 存的是注册时的原始字符串，
+    /// 而探测入参会先 trim，不归一化会把「自己绑定的键」误判成「被别人占用」。
+    fn is_bound(&self, accelerator: &str) -> bool {
+        match self.bindings.lock() {
+            Ok(bindings) => bindings
+                .values()
+                .any(|bound| bound.trim() == accelerator.trim()),
+            Err(_) => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,6 +432,20 @@ mod tests {
             match self {
                 Ok(value) => value,
                 Err(e) => panic!("{}: {}", context, e),
+            }
+        }
+    }
+
+    /// 测试辅助：把 Err 的错误映射为 panic 消息（仅测试代码允许）
+    trait UnwrapErrTest {
+        fn unwrap_err_or_fail(self, context: &str) -> String;
+    }
+
+    impl UnwrapErrTest for Result<Shortcut, String> {
+        fn unwrap_err_or_fail(self, context: &str) -> String {
+            match self {
+                Ok(_) => panic!("{}: 期望错误，实际成功", context),
+                Err(e) => e,
             }
         }
     }
@@ -396,5 +541,112 @@ mod tests {
             .unwrap_or_fail("resume");
         let suspended = manager.suspended.lock().unwrap();
         assert!(!suspended.contains(&HotkeyAction::Clipboard));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 探测结果字段集合与前端fixture一致() {
+        let fixture = include_str!("../../../src/lib/contract/HotkeyProbeResult.keys.json");
+        let expected: Vec<String> = serde_json::from_str(fixture).expect("parse fixture");
+
+        let result = HotkeyProbeResult {
+            accelerator: "Super+Space".to_string(),
+            available: true,
+            reason: HotkeyProbeReason::Available,
+            message: "当前可用".to_string(),
+        };
+
+        let value = serde_json::to_value(&result).expect("serialize");
+        let mut actual: Vec<String> = value.as_object().expect("object").keys().cloned().collect();
+        actual.sort();
+
+        let mut expected_sorted = expected;
+        expected_sorted.sort();
+
+        assert_eq!(actual, expected_sorted);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 探测原因序列化为小写英文() {
+        let value = serde_json::to_value(HotkeyProbeReason::Available).expect("serialize");
+        assert_eq!(value, serde_json::json!("available"));
+        let value = serde_json::to_value(HotkeyProbeReason::Occupied).expect("serialize");
+        assert_eq!(value, serde_json::json!("occupied"));
+        let value = serde_json::to_value(HotkeyProbeReason::Invalid).expect("serialize");
+        assert_eq!(value, serde_json::json!("invalid"));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 探测格式非法的组合键返回不可用结论() {
+        let manager = HotkeyManager::new();
+
+        let result = manager.probe("Bogus+Key").unwrap_or_fail("probe invalid");
+        assert_eq!(result.reason, HotkeyProbeReason::Invalid);
+        assert!(!result.available);
+        assert!(result.message.contains("不是有效的组合键"));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 探测空字符串返回不可用结论() {
+        let manager = HotkeyManager::new();
+
+        let result = manager.probe("   ").unwrap_or_fail("probe empty");
+        assert_eq!(result.reason, HotkeyProbeReason::Invalid);
+        assert!(!result.available);
+        assert_eq!(result.message, "热键未设置");
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 自身绑定的组合键判定为已绑定() {
+        let manager = HotkeyManager::new();
+        manager
+            .set_binding(HotkeyAction::Launcher, "Super+Space")
+            .unwrap_or_fail("set binding");
+
+        assert!(manager.is_bound("Super+Space"));
+        // 两边都 trim，避免把「自己绑定的键」误判成「被别人占用」
+        assert!(manager.is_bound(" Super+Space "));
+        assert!(manager.is_bound("Super+Space "));
+        assert!(!manager.is_bound("Alt+Space"));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 探测自身绑定的组合键返回可用结论() {
+        let manager = HotkeyManager::new();
+        manager
+            .set_binding(HotkeyAction::Launcher, "Super+Space")
+            .unwrap_or_fail("set binding");
+
+        // 即便底层 OS 里该组合键已被本应用占用，也应报「可用」而非「被占用」
+        let result = manager
+            .probe("Super+Space")
+            .unwrap_or_fail("probe own binding");
+        assert_eq!(result.reason, HotkeyProbeReason::Available);
+        assert!(result.available);
+        assert!(result.message.contains("本应用已绑定"));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 探测的组合键格式校验() {
+        // 合法组合键（含 Win/Super）
+        assert!(parse_shortcut("Super+Space").is_ok());
+        assert!(parse_shortcut("Alt+Space").is_ok());
+        assert!(parse_shortcut("Ctrl+Alt+Shift+Super+K").is_ok());
+
+        // 空值
+        let err = parse_shortcut("").unwrap_err_or_fail("empty");
+        assert_eq!(err, "热键未设置");
+        let err = parse_shortcut("   ").unwrap_err_or_fail("blank");
+        assert_eq!(err, "热键未设置");
+
+        // 非法组合键
+        let err = parse_shortcut("Bogus+Key").unwrap_err_or_fail("bogus");
+        assert!(err.contains("不是有效的组合键"));
     }
 }

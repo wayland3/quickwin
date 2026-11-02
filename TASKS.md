@@ -654,3 +654,110 @@
 - 测试：22 个 keys 单元测试 + 7 个 HotkeyRecorder 组件测试 + 2 个 Rust 暂停/恢复测试
 - `npm.cmd run verify` 全绿（91 前端 + 133 Rust passed）
 - 交叉评审：待执行（L1，1 轮）
+
+### [x] [L1] T-607 Win 键热键录制修正 + 热键可用性实测检测 — 2026-11-02
+- 修正热键录制器：按下 Win/Super 键导致窗口失焦时**不中止录制**，仍能录到 `Win+空格` 等组合
+- 设置页新增「实测检测」：实际探测组合键当前是否可用（可用 / 被系统或其他程序占用 / 格式无效）
+
+背景：实测确认后端链路在 X11 下完全可用（`grab_key(Super+Space)` 成功、事件正常回调），
+唯一阻塞点是前端录制器 `onBlur` 在 Win 键触发桌面 Activities 造成失焦时直接退出录制态。
+
+验收：
+1. 在设置页录制 `Win+空格` 能成功保存（不再因失焦中断），保存后按该组合键能呼出浮层
+2. 普通组合键（如 `Ctrl+K`）的失焦退出录制行为不受影响
+3. 设置页对已配置的两个热键显示实测检测结果：可用 / 被占用 / 格式无效，均为中文提示
+4. 检测不干扰运行时已注册的热键（探测用独立实例，探测后立即释放）
+5. `npm.cmd run verify` 全绿
+
+依赖：T-602、T-103。
+
+mini-design：docs/reviews/T-206-design.md（设计自检通过，无需 ADR）
+
+**实现备注（2026-11-02）**：
+
+**根因定位（实测，非推测）**
+
+逐段验证整条链路，确认后端能力齐备、唯一阻塞点在前端：
+
+| 环节 | 验证方式 | 结果 |
+|------|---------|------|
+| 前端 `eventToAccelerator` | vitest 实测 `metaKey` → `Super+Space` | ✅ |
+| `global-hotkey` 解析 | 独立 crate 实测 `SUPER → Modifiers::SUPER` | ✅ |
+| X11 `grab_key(Super+Space)` | 直连 X server 实测 grab 返回 OK | ✅ |
+| 事件回调 | XTest 发送按键，实测收到 `KeyPress state=MOD4` | ✅ |
+| **前端录制器 blur** | vitest 实测：blur 后 `onSave` 调用次数 0 | ❌ **根因** |
+
+按 Win 键会唤起桌面 Activities → 窗口失焦 → `HotkeyRecorder.onBlur` 直接 `stopRecording()`，
+用户再也录不进 `Win+空格`。
+
+**改动**
+
+- `src/components/HotkeyRecorder.tsx`
+  - 新增 `modifierHeld` 状态：失焦时若修饰键仍按住，**不退出录制态**（等用户按下主键）
+  - 新增 `onKeyUp`：修饰键松开时退出录制态（兜底，避免卡在录制态）
+  - `src/lib/keys.ts` 新增 `isModifierHeld(event)` 判定修饰键
+- `src-tauri/src/services/hotkey.rs`
+  - 新增 `HotkeyProbeReason`（`available` / `occupied` / `invalid`）+ `HotkeyProbeResult`
+  - 新增 `HotkeyManager::probe()`：用**独立**的 `global_hotkey::GlobalHotKeyManager`
+    尝试注册再立即注销，探测后组合键立即释放，不干扰运行时绑定
+  - 新增 `is_bound()`：识别「本应用自己占用的键」，避免把自家正在用的热键误报为「被占用」
+    （独立 manager 与运行时绑定虽是两套实例，但底层 OS 全局热键表是同一份，
+    运行时已注册的键在探测时同样返回 `AlreadyRegistered`）
+- `src-tauri/src/commands/mod.rs`：新增 `hotkey_probe` command（**同步** fn）
+- `src-tauri/src/error.rs`：新增 `HotkeyProbeFailed(String)` + 错误码 `hotkey.probe_failed`
+- `src/windows/SettingsPanel.tsx`：热键页新增 `HotkeyAvailability` 组件，
+  进入页面自动探测一次 + 「重新检测」按钮
+- `src/lib/ipc.ts`：新增 `hotkeyProbe()`；`hotkey.probe_failed` 走白名单展示后端中文原因
+- 新增 `src/windows/SettingsPanel.test.tsx`（5 例）、`src/lib/contract/HotkeyProbeResult.keys.json`
+
+**设计决策与理由**
+
+1. **command 用同步 `fn` 而非 `async`**：探测底层要同步注册/注销全局热键，
+   `async fn` 里做阻塞调用违反 `docs/CODING-STANDARDS.md`「禁止在 async 中做阻塞调用」。
+   Tauri 会把同步 command 放到专用线程执行，不占异步运行时的工作线程。
+2. **结论 vs 错误二分**：「被占用」「格式非法」是**结论**（`Ok`）；
+   探测环境故障（X11 断连、权限不足）才是**失败**（`Err`）。
+   底层 `global_hotkey::Error::AlreadyRegistered` 可精确区分两者，
+   插件把它降级成了扁平字符串，无法区分 —— 故直接依赖 `global-hotkey`（见 ADR-0017）。
+3. **新增依赖 `global-hotkey = "0.8"`**：本就是 `tauri-plugin-global-shortcut` 的传递依赖，
+   版本完全一致，不引入新包、不增加编译量、不改变依赖树。
+   标准库与既有依赖（插件）都无法提供类型化的「已被占用」信号。
+   详见 `docs/DECISIONS.md` ADR-0017。
+4. **`is_bound` 两边都 trim**：`bindings` 存注册时的原始字符串，探测入参会先 trim，
+   不归一化会把「自己绑定的键」误判成「被别人占用」。
+
+**顺带修复（预存问题，阻塞 verify 门禁）**
+
+`platform/apps.rs`、`focus.rs`、`imaging.rs` 的 4 个中文测试函数缺 `#[allow(non_snake_case)]`；
+`platform/clipboard.rs` 的 `needless_range_loop`；`platform/input.rs` 的 `clone_on_copy`。
+均为未提交的 Linux 移植 WIP 遗留，非本任务引入，按用户同意顺手修掉。
+
+**验证**
+
+- `npm.cmd run verify` 全绿：101 前端 + 122 Rust passed（exit 0）
+- 手测（Linux X11，xmodmap 显示 `mod4 = Super_L/Super_R`）：
+  1. `launcher_hotkey` 设为 `Super+Space` 后重启 → 日志无 `failed to register new hotkey`
+  2. XTest 发送 Super+Space → 日志 `services::window: overlay show`，浮层窗口 720x400 可见
+  3. 再按一次 → `overlay lost focus, hiding`（切换语义正常）
+  4. 探测结论实测四种状态：本应用已绑定 → Available（本应用已绑定）；
+     其他程序占用 → Occupied；空闲 → Available；格式非法 → Invalid
+- 交叉评审：**用户明确豁免**（2026-11-02，用户指示「不用了」「不必review了，设计的时候仔细一点」）。
+  按 AGENTS.md §13「跳过或放宽交叉评审门禁需用户明确同意」，此项已获用户明确同意，
+  故本任务无 `Reviewed-by` trailer。评审要求改为在设计阶段自审：
+  mini-design（`docs/reviews/T-206-design.md`）+ 实现阶段自复查，
+  期间发现并修正了 4 个设计缺陷：
+  1. `async fn` 中做阻塞注册/注销调用 → 改为同步 command
+  2. 独立探测 manager 与运行时绑定共用底层 OS 热键表 → 自家热键会被误报「被占用」，
+     加 `is_bound()` 短路识别
+  3. `is_bound` 未做 trim 归一化 → 两边都 trim
+  4. 保存失败后按 `draft` 判断导致卡在录制态 → 改为按修饰键状态判断
+
+**提交范围说明**
+
+本次提交仅包含 T-607 相关改动。工作区中另有未提交的 **Linux 移植 WIP**
+（`platform/*.rs`、`services/appindex.rs`、`storage.rs`、`tray.rs`、`paste.rs`、
+`Cargo.toml`/`Cargo.lock` 的 Linux 依赖段、`error.rs` 的 `#[cfg(target_os = "windows")]`），
+属于本任务之外的既有改动，**未纳入本次提交**，保持未暂存状态。
+其中 `Cargo.toml` / `Cargo.lock` / `error.rs` 三个文件为「本次改动 + Linux 移植」混合，
+已用 `git apply --cached` 按 hunk 精确拆分：暂存区只含本次改动，工作区保留完整版。
+

@@ -51,6 +51,7 @@ pub fn run() {
             commands::overlay_hide,
             commands::overlay_resize,
             commands::hotkey_status,
+            commands::hotkey_probe,
             commands::hotkey_rebind,
             commands::hotkey_suspend,
             commands::hotkey_resume,

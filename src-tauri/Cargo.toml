@@ -11,6 +11,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "protocol-asset", "image-png"] }
 tauri-plugin-global-shortcut = "2"
+# 直接依赖以获得类型化的热键错误（Error::AlreadyRegistered），用于 T-607 热键可用性实测。
+# 本就是 tauri-plugin-global-shortcut 的传递依赖，版本一致，不引入新包。
+global-hotkey = "0.8"
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-opener = "2"
