@@ -65,7 +65,9 @@ pub fn restore(prev: &ForegroundWindow, timeout_ms: u32) -> Result<(), AppError>
 
     #[cfg(target_os = "linux")]
     {
+        // Linux 降级实现：暂不做焦点恢复，调用方按「已复制，请手动粘贴」处理。
         // TODO: 接入 xcb + XSetInputFocus 实现
+        let _ = (prev, timeout_ms);
         Ok(())
     }
 }
@@ -79,7 +81,9 @@ pub fn release_stuck_modifiers(prev: &ForegroundWindow) {
 
     #[cfg(target_os = "linux")]
     {
+        // Linux 降级实现：暂无卡键问题。
         // TODO: 接入 xcb + XQueryKeymap 实现
+        let _ = prev;
     }
 }
 

@@ -51,6 +51,19 @@ describe('keys', () => {
       expect(eventToAccelerator(event)).toBe('Super+K');
     });
 
+    it('Linux X11 上 Win 键名 Super/OS/Win 不应被当成主键', () => {
+      // 回归：此前只认 Meta，导致生成 'Ctrl+Super' 这种缺主键的残缺组合
+      expect(eventToAccelerator(makeKeyEvent('Super', { ctrl: true }))).toBeNull();
+      expect(eventToAccelerator(makeKeyEvent('OS', { ctrl: true }))).toBeNull();
+      expect(eventToAccelerator(makeKeyEvent('Win', { ctrl: true }))).toBeNull();
+      expect(eventToAccelerator(makeKeyEvent('Hyper', { ctrl: true }))).toBeNull();
+    });
+
+    it('Win+Space 生成 Super+Space', () => {
+      const event = makeKeyEvent(' ', { meta: true });
+      expect(eventToAccelerator(event)).toBe('Super+Space');
+    });
+
     it('只有修饰键返回 null', () => {
       const event = makeKeyEvent('Control', { ctrl: true });
       expect(eventToAccelerator(event)).toBeNull();

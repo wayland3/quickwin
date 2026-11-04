@@ -219,12 +219,26 @@ fn validate_hotkey(accelerator: &str) -> Result<(), String> {
         return Err("不能为空".to_string());
     }
 
-    let parts: Vec<&str> = trimmed.split('+').collect();
-    if parts.iter().any(|part| part.trim().is_empty()) {
+    let parts: Vec<&str> = trimmed.split('+').map(str::trim).collect();
+    if parts.iter().any(|part| part.is_empty()) {
         return Err("格式错误，示例：Alt+Space".to_string());
     }
     if parts.len() < 2 {
         return Err("至少需要一个修饰键，示例：Alt+Space".to_string());
+    }
+
+    // 最后一段必须是真正的主键，不能还是修饰键
+    //
+    // 防止把「Ctrl+Super」这种只有修饰键的残缺组合存进数据库：
+    // 它注册时必然解析失败，且会让启动流程反复回退默认键。
+    let Some(main_key) = parts.last() else {
+        return Err("格式错误，示例：Alt+Space".to_string());
+    };
+    const MODIFIER_NAMES: [&str; 11] = [
+        "ctrl", "control", "alt", "option", "shift", "super", "meta", "win", "os", "hyper", "cmd",
+    ];
+    if MODIFIER_NAMES.contains(&main_key.to_ascii_lowercase().as_str()) {
+        return Err("缺少主键，示例：Alt+Space（不能只用修饰键组合）".to_string());
     }
 
     Ok(())
@@ -352,6 +366,32 @@ mod settings_tests {
         }
         .validate()
         .is_err());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 只有修饰键的热键被拒绝() {
+        // 回归：录制器曾把 Win 键当成主键，产生「Ctrl+Super」缺主键的组合，
+        // 注册必然失败且会被持久化，启动时反复回退。必须在校验层拦住。
+        for bad in ["Ctrl+Super", "Ctrl+Shift", "Alt+Meta", "Shift+Win"] {
+            assert!(
+                Settings {
+                    launcher_hotkey: bad.to_string(),
+                    ..Settings::default()
+                }
+                .validate()
+                .is_err(),
+                "{bad} 应被拒绝"
+            );
+        }
+        // 正常组合仍然通过
+        for good in ["Super+Space", "Alt+Space", "Ctrl+Alt+K"] {
+            let settings = Settings {
+                launcher_hotkey: good.to_string(),
+                ..Settings::default()
+            };
+            assert!(settings.validate().is_ok(), "{good} 应通过");
+        }
     }
 
     #[test]

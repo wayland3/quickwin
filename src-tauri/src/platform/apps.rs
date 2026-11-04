@@ -74,7 +74,9 @@ mod windows_impl {
         SHCreateItemWithParent, SHGetDesktopFolder, SHGetKnownFolderIDList, ShellExecuteW, AO_NONE,
         SHCONTF_FOLDERS, SHCONTF_NONFOLDERS, SIGDN_NORMALDISPLAY,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY, SW_SHOWNORMAL};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        AllowSetForegroundWindow, ASFW_ANY, SW_SHOWNORMAL,
+    };
 
     /// `CLSID_ShellLink`：快捷方式 COM 对象
     const CLSID_SHELL_LINK: GUID = GUID::from_u128(0x0002_1401_0000_0000_c000_0000_0000_0046);
@@ -169,18 +171,18 @@ mod windows_impl {
 
         let mut icon_buf = vec![0u16; 1024];
         let mut icon_index = 0i32;
-        let icon_path = if unsafe { shell_link.GetIconLocation(&mut icon_buf, &mut icon_index) }.is_ok()
-        {
-            string_from_wide(&icon_buf).map(|icon| {
-                if icon_index == 0 {
-                    icon
-                } else {
-                    format!("{icon},{icon_index}")
-                }
-            })
-        } else {
-            None
-        };
+        let icon_path =
+            if unsafe { shell_link.GetIconLocation(&mut icon_buf, &mut icon_index) }.is_ok() {
+                string_from_wide(&icon_buf).map(|icon| {
+                    if icon_index == 0 {
+                        icon
+                    } else {
+                        format!("{icon},{icon_index}")
+                    }
+                })
+            } else {
+                None
+            };
 
         Some(ResolvedShortcut {
             link: link.to_path_buf(),
@@ -502,11 +504,13 @@ mod windows_impl {
             .map_err(|error| AppError::Internal(format!("打开桌面 Shell 失败: {}", error)))?;
 
         // SAFETY: PIDL 由 SHGetKnownFolderIDList 分配、绑定期间有效；pbc 允许为空
-        let folder = unsafe { desktop.BindToObject::<_, IShellFolder>(folder_pidl, None::<&IBindCtx>) };
+        let folder =
+            unsafe { desktop.BindToObject::<_, IShellFolder>(folder_pidl, None::<&IBindCtx>) };
         // SAFETY: 绑定完成后不再使用该 PIDL，必须由调用方释放
         unsafe { CoTaskMemFree(Some(folder_pidl as *const core::ffi::c_void)) };
-        let folder = folder
-            .map_err(|error| AppError::Internal(format!("绑定 AppsFolder 到 Shell 失败: {}", error)))?;
+        let folder = folder.map_err(|error| {
+            AppError::Internal(format!("绑定 AppsFolder 到 Shell 失败: {}", error))
+        })?;
 
         let mut enumerator = None;
         // SAFETY: 窗口句柄传空表示无 owner；枚举标志为文件夹 + 非文件夹

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { eventToAccelerator, isModifierHeld } from '../lib/keys';
+import { eventToAccelerator } from '../lib/keys';
 import { ipc } from '../lib/ipc';
 
 interface HotkeyRecorderProps {
@@ -20,6 +20,15 @@ interface HotkeyRecorderProps {
  * - Esc：取消录制，恢复原值
  * - Backspace：清空热键
  * - 录制期间暂停全局热键，避免误触发
+ *
+ * # Linux 上 Win 键的特殊处理
+ *
+ * 按 Win/Super 键会唤起桌面的 Activities / 应用菜单，窗口随之失焦。
+ * 窗口一旦失焦，绑定在按钮上的 `onKeyDown` 就收不到后续的 Space 等主键，
+ * 只能拿到「Ctrl+Super」这种缺主键的残缺组合（后端解析失败）。
+ *
+ * 因此录制态改用 **window 捕获阶段** 监听键盘事件：只要 WebView 还活着，
+ * 即便窗口失焦也能收到按键。同时失焦不再立即退出录制，而是延迟兜底。
  */
 export function HotkeyRecorder({
   value,
@@ -30,16 +39,22 @@ export function HotkeyRecorder({
   const [isRecording, setIsRecording] = useState(false);
   const [draft, setDraft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  /** 录制期间是否有修饰键按住（用于失焦时判定是否退出录制） */
-  const [modifierHeld, setModifierHeld] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
+  const blurTimeoutRef = useRef<number | null>(null);
+  const recordingRef = useRef(false);
+  /** 最近一次按键后是否已有主键（用于失焦兜底判断） */
+  const gotMainKeyRef = useRef(false);
+
+  useEffect(() => {
+    recordingRef.current = isRecording;
+  }, [isRecording]);
 
   // 进入录制态
   const startRecording = useCallback(async () => {
     setIsRecording(true);
     setDraft(null);
     setError(null);
-    setModifierHeld(false);
+    gotMainKeyRef.current = false;
 
     // 暂停全局热键，避免录制时误触发
     try {
@@ -48,7 +63,6 @@ export function HotkeyRecorder({
       // 暂停失败不阻断录制，只是可能误触发
     }
 
-    // 聚焦按钮以捕获键盘事件
     buttonRef.current?.focus();
   }, [action]);
 
@@ -56,9 +70,13 @@ export function HotkeyRecorder({
   const stopRecording = useCallback(async () => {
     setIsRecording(false);
     setDraft(null);
-    setModifierHeld(false);
+    gotMainKeyRef.current = false;
 
-    // 恢复全局热键
+    if (blurTimeoutRef.current !== null) {
+      window.clearTimeout(blurTimeoutRef.current);
+      blurTimeoutRef.current = null;
+    }
+
     try {
       await ipc.hotkeyResume(action);
     } catch {
@@ -92,81 +110,84 @@ export function HotkeyRecorder({
     }
   }, [onSave, stopRecording]);
 
-  // 键盘事件处理
-  const handleKeyDown = useCallback(
-    async (event: React.KeyboardEvent) => {
-      if (!isRecording) return;
+  // 全局键盘监听（捕获阶段）
+  //
+  // 用 window + capture 而不是按钮的 onKeyDown：窗口失焦后按钮收不到事件。
+  useEffect(() => {
+    if (!isRecording) return;
 
+    const onKeyDown = (event: KeyboardEvent) => {
       event.preventDefault();
       event.stopPropagation();
 
-      // Esc：取消录制
       if (event.key === 'Escape') {
-        await stopRecording();
+        void stopRecording();
         return;
       }
 
-      // Backspace：清空热键
       if (event.key === 'Backspace') {
-        await clearHotkey();
+        void clearHotkey();
         return;
       }
 
-      // 记录当前按下的修饰键，供失焦判定使用
-      setModifierHeld(isModifierHeld(event.nativeEvent));
-
-      // 尝试构建 accelerator
-      const accelerator = eventToAccelerator(event.nativeEvent);
+      const accelerator = eventToAccelerator(event);
       if (accelerator) {
+        gotMainKeyRef.current = true;
         setDraft(accelerator);
-        await saveHotkey(accelerator);
+        void saveHotkey(accelerator);
       }
-    },
-    [isRecording, stopRecording, clearHotkey, saveHotkey],
-  );
+    };
 
-  // 键盘事件抬起：更新修饰键状态
-  //
-  // 兜底：修饰键松开时退出录制态。
-  // - 只按了 Win 就松手（没录到组合键）→ 退出，避免停在录制态
-  // - 录到了但保存失败 → 也退出，让用户看到错误并决定下一步
-  //   （错误信息在退出后依然显示，用户可重新点击录制）
-  //
-  // 用 ref 而不是 draft 判断是否录到过：draft 在保存失败时仍有值，
-  // 若以 draft 为准就会永远停在录制态（修饰键已松开，不再有 keyup 触发）。
-  const handleKeyUp = useCallback(
-    (event: React.KeyboardEvent) => {
-      if (!isRecording) return;
-      const stillHeld = isModifierHeld(event.nativeEvent);
-      setModifierHeld(stillHeld);
-      if (!stillHeld) {
-        stopRecording();
-      }
-    },
-    [isRecording, stopRecording],
-  );
+    // 修饰键全部松开 → 退出录制态
+    //
+    // 保存成功时 saveHotkey 已停止录制；这里主要兜底「保存失败」与
+    // 「只按了修饰键就松手」两种情况，避免卡在录制态。错误提示保留。
+    const onKeyUp = (event: KeyboardEvent) => {
+      const modifierStillHeld =
+        event.ctrlKey || event.altKey || event.shiftKey || event.metaKey;
+      if (modifierStillHeld) return;
+      void stopRecording();
+    };
 
-  // 失焦时退出录制态
+    window.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('keyup', onKeyUp, true);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('keyup', onKeyUp, true);
+    };
+  }, [isRecording, stopRecording, clearHotkey, saveHotkey]);
+
+  // 失焦兜底：延迟退出，给用户按主键的时间
   //
-  // 例外：修饰键仍按住时不退出。按 Win/Super 键会唤起系统开始菜单或桌面
-  // Activities，导致窗口失焦；若此时退出录制，用户就再也录不进 `Win+空格`
-  // 这类组合。修饰键松开后若仍未录到组合键，由 keyup 兜底退出录制态。
+  // Linux 上按 Win 必然失焦；500ms 内若没有拿到主键才退出。
   const handleBlur = useCallback(() => {
     if (!isRecording) return;
-    if (modifierHeld) return;
-    stopRecording();
-  }, [isRecording, modifierHeld, stopRecording]);
+
+    if (blurTimeoutRef.current !== null) {
+      window.clearTimeout(blurTimeoutRef.current);
+    }
+
+    blurTimeoutRef.current = window.setTimeout(() => {
+      blurTimeoutRef.current = null;
+      if (!recordingRef.current) return;
+      // 已拿到主键（组合已保存）或仍在按修饰键：不退出
+      if (gotMainKeyRef.current || draft) return;
+      void stopRecording();
+    }, 500);
+  }, [isRecording, draft, stopRecording]);
 
   // 组件卸载时确保恢复热键
   useEffect(() => {
     return () => {
-      if (isRecording) {
+      if (recordingRef.current) {
         ipc.hotkeyResume(action).catch(() => {});
       }
+      if (blurTimeoutRef.current !== null) {
+        window.clearTimeout(blurTimeoutRef.current);
+      }
     };
-  }, [isRecording, action]);
+  }, [action]);
 
-  // 显示文本
   const displayText = isRecording
     ? draft
       ? draft
@@ -178,9 +199,7 @@ export function HotkeyRecorder({
       <button
         ref={buttonRef}
         type="button"
-        onClick={startRecording}
-        onKeyDown={handleKeyDown}
-        onKeyUp={handleKeyUp}
+        onClick={() => void startRecording()}
         onBlur={handleBlur}
         className={`rounded-lg border px-3 py-1.5 text-sm transition-colors focus:outline-none ${
           isRecording

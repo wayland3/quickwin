@@ -677,12 +677,10 @@ mod linux_impl {
 
         let content_key = match cb.get_text() {
             Ok(text) => text,
-            Err(_) => {
-                match cb.get_image() {
-                    Ok(img) => format!("image:{}x{}", img.width, img.height),
-                    Err(_) => String::new(),
-                }
-            }
+            Err(_) => match cb.get_image() {
+                Ok(img) => format!("image:{}x{}", img.width, img.height),
+                Err(_) => String::new(),
+            },
         };
 
         let hash = compute_hash(&content_key);
@@ -767,8 +765,9 @@ mod linux_impl {
         use image::{codecs::png::PngEncoder, ImageBuffer, RgbaImage};
         use std::io::Cursor;
 
-        let buffer: RgbaImage = ImageBuffer::from_raw(width as u32, height as u32, rgba.to_vec())
-            .ok_or_else(|| AppError::Internal("invalid image dimensions".into()))?;
+        let buffer: RgbaImage =
+            ImageBuffer::from_raw(width as u32, height as u32, rgba.to_vec())
+                .ok_or_else(|| AppError::Internal("invalid image dimensions".into()))?;
 
         let mut png_bytes = Vec::new();
         let cursor = Cursor::new(&mut png_bytes);
@@ -813,8 +812,9 @@ mod linux_impl {
                     height: height as usize,
                     bytes: rgba.into_raw().into(),
                 };
-                cb.set_image(img_data)
-                    .map_err(|e| AppError::Internal(format!("clipboard image write failed: {}", e)))?;
+                cb.set_image(img_data).map_err(|e| {
+                    AppError::Internal(format!("clipboard image write failed: {}", e))
+                })?;
             }
             ClipboardContent::Files(files) => {
                 // Linux 剪贴板文件列表用 URI 列表

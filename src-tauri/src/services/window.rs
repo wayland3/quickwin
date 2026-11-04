@@ -81,10 +81,13 @@ impl OverlayManager {
     }
 
     pub fn show(&self, window: &Window, mode: OverlayMode) -> Result<(), AppError> {
+        log::info!("show: called with mode {:?}", mode);
         let mut state = self
             .state
             .lock()
             .map_err(|_| AppError::Internal("lock poisoned".into()))?;
+
+        log::info!("show: current state is {:?}", *state);
 
         // 状态机转换
         match *state {
@@ -95,20 +98,25 @@ impl OverlayManager {
                     .lock()
                     .map_err(|_| AppError::Internal("lock poisoned".into()))?;
                 if *current == Some(mode) {
+                    log::info!("show: same mode, will hide");
                     drop(state);
                     drop(current);
                     return self.hide(window, HideReason::ModeSwitch);
                 }
+                log::info!("show: different mode, will switch");
                 // 不同 mode，直接切换（不 capture，浮层已是前台）
             }
             OverlayState::Hiding => {
+                log::info!("show: state is Hiding, will cancel and show");
                 // 取消隐藏，立即显示（不 capture）
             }
             OverlayState::Showing => {
+                log::info!("show: already Showing, ignoring");
                 // 已在显示中，忽略
                 return Ok(());
             }
             OverlayState::Hidden => {
+                log::info!("show: state is Hidden, will show normally");
                 // 正常显示：capture 前台窗口
                 let prev = capture_foreground();
                 log::info!(
@@ -282,6 +290,7 @@ impl OverlayManager {
     }
 
     pub fn hide(&self, window: &Window, reason: HideReason) -> Result<(), AppError> {
+        log::info!("hide: called with reason {:?}", reason);
         let mut state = self
             .state
             .lock()
@@ -291,17 +300,21 @@ impl OverlayManager {
         match *state {
             OverlayState::Hidden => {
                 // 已隐藏，幂等
+                log::info!("hide: already Hidden, skipping");
                 return Ok(());
             }
             OverlayState::Hiding => {
                 // 已在隐藏中，忽略
+                log::info!("hide: already Hiding, skipping");
                 return Ok(());
             }
             OverlayState::Showing => {
                 // 取消显示，立即隐藏
+                log::info!("hide: state is Showing, will hide immediately");
             }
             OverlayState::Shown => {
                 // 正常隐藏
+                log::info!("hide: state is Shown, will hide normally");
             }
         }
 
@@ -310,10 +323,17 @@ impl OverlayManager {
 
         // 隐藏窗口
         let reduced_motion = self.prefers_reduced_motion_reduced();
+        log::info!(
+            "hide: reduced_motion={}, reason={:?}",
+            reduced_motion,
+            reason
+        );
         if reduced_motion || reason != HideReason::UserCommand {
             // 立即隐藏（无动画或不需要恢复焦点）
+            log::info!("hide: calling window.hide() immediately");
             window.hide()?;
             *state = OverlayState::Hidden;
+            log::info!("hide: window hidden, state set to Hidden");
 
             // 仅 UserCommand 恢复焦点
             if reason == HideReason::UserCommand {
@@ -452,6 +472,7 @@ impl OverlayManager {
             .lock()
             .map_err(|_| AppError::Internal("lock poisoned".into()))?;
         if !*hide_on_blur {
+            log::info!("on_blur: hide_on_blur is disabled, skipping");
             return Ok(());
         }
 
@@ -461,10 +482,12 @@ impl OverlayManager {
             .map_err(|_| AppError::Internal("lock poisoned".into()))?;
         if *state != OverlayState::Shown {
             // 只在 Shown 状态下响应 blur
+            log::info!("on_blur: state is {:?}, not Shown, skipping", *state);
             return Ok(());
         }
         drop(state);
 
+        log::info!("on_blur: calling hide with Blur reason");
         self.hide(window, HideReason::Blur)
     }
 

@@ -92,9 +92,18 @@ impl HotkeyManager {
         action: HotkeyAction,
         accelerator: &str,
     ) -> Result<(), AppError> {
-        let shortcut: Shortcut = accelerator
-            .parse()
-            .map_err(|_| AppError::Internal(format!("invalid accelerator: {}", accelerator)))?;
+        log::info!(
+            "register: action={:?}, accelerator='{}'",
+            action,
+            accelerator
+        );
+
+        let shortcut: Shortcut = accelerator.parse().map_err(|e| {
+            log::error!("register: parse failed: {:?}", e);
+            AppError::Internal(format!("invalid accelerator: {}", accelerator))
+        })?;
+
+        log::info!("register: parsed shortcut successfully");
 
         let suspended_clone = self.suspended.clone();
         let result = app.global_shortcut().on_shortcut(shortcut, {
@@ -117,6 +126,7 @@ impl HotkeyManager {
 
         match result {
             Ok(_) => {
+                log::info!("register: on_shortcut succeeded");
                 let mut bindings = self
                     .bindings
                     .lock()
@@ -132,7 +142,8 @@ impl HotkeyManager {
 
                 Ok(())
             }
-            Err(_) => {
+            Err(e) => {
+                log::error!("register: on_shortcut failed: {:?}", e);
                 let failed_hotkey = FailedHotkey {
                     action,
                     accelerator: accelerator.to_string(),
