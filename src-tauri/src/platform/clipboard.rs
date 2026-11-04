@@ -730,7 +730,35 @@ mod linux_impl {
         let mut clipboard = get_clipboard()?;
         let cb = clipboard.as_mut().ok_or(AppError::ClipboardRead)?;
 
-        // 优先读文本
+        // 文件列表优先：X11 上是 text/uri-list。
+        //
+        // 文件管理器复制文件时往往同时提供 text/plain（文件名），若先读文本
+        // 就会把「复制文件」误判成「复制文件名」，丢失文件类型与粘贴能力。
+        // 纯文本剪贴板没有 URI_LIST 目标，这里会直接失败并回退到文本分支。
+        if let Ok(files) = cb.get().file_list() {
+            if !files.is_empty() {
+                let paths: Vec<String> = files
+                    .iter()
+                    .map(|path| path.to_string_lossy().to_string())
+                    .collect();
+                log::info!("clipboard linux: kind=files count={}", paths.len());
+                let preview = if paths.len() == 1 {
+                    paths[0].clone()
+                } else {
+                    format!("{} 个文件", paths.len())
+                };
+                let (preview, _) = truncate_chars(&preview, PREVIEW_MAX_CHARS);
+                return Ok(Some(ClipboardEntry {
+                    content: ClipboardContent::Files(paths),
+                    preview,
+                    truncated: false,
+                    source_app: None,
+                    source_title: None,
+                }));
+            }
+        }
+
+        // 其次读文本
         if let Ok(text) = cb.get_text() {
             if !text.is_empty() {
                 // 诊断日志：只记类型与长度，不记内容（AGENTS.md §10）
@@ -767,6 +795,7 @@ mod linux_impl {
         }
 
         // 尝试读图片
+
         if let Ok(img) = cb.get_image() {
             log::info!("clipboard linux: kind=image {}x{}", img.width, img.height);
             let bytes = img.bytes.into_owned();
@@ -865,10 +894,12 @@ mod linux_impl {
                 })?;
             }
             ClipboardContent::Files(files) => {
-                // Linux 剪贴板文件列表用 URI 列表
-                let uris: Vec<String> = files.iter().map(|f| format!("file://{}", f)).collect();
-                cb.set_text(uris.join("\n"))
-                    .map_err(|e| AppError::Internal(format!("clipboard write failed: {}", e)))?;
+                // Linux 用 text/uri-list 表示为文件列表，让目标程序能识别为「文件」
+                let paths: Vec<std::path::PathBuf> =
+                    files.iter().map(std::path::PathBuf::from).collect();
+                cb.set().file_list(&paths).map_err(|e| {
+                    AppError::Internal(format!("clipboard file write failed: {}", e))
+                })?;
             }
         }
 
