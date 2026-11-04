@@ -730,33 +730,36 @@ mod linux_impl {
         let mut clipboard = get_clipboard()?;
         let cb = clipboard.as_mut().ok_or(AppError::ClipboardRead)?;
 
-        // 文件列表优先：X11 上是 text/uri-list。
+        // ============================================================
+        // 【暂时停用】文件列表（text/uri-list）捕获
         //
-        // 文件管理器复制文件时往往同时提供 text/plain（文件名），若先读文本
-        // 就会把「复制文件」误判成「复制文件名」，丢失文件类型与粘贴能力。
-        // 纯文本剪贴板没有 URI_LIST 目标，这里会直接失败并回退到文本分支。
-        if let Ok(files) = cb.get().file_list() {
-            if !files.is_empty() {
-                let paths: Vec<String> = files
-                    .iter()
-                    .map(|path| path.to_string_lossy().to_string())
-                    .collect();
-                log::info!("clipboard linux: kind=files count={}", paths.len());
-                let preview = if paths.len() == 1 {
-                    paths[0].clone()
-                } else {
-                    format!("{} 个文件", paths.len())
-                };
-                let (preview, _) = truncate_chars(&preview, PREVIEW_MAX_CHARS);
-                return Ok(Some(ClipboardEntry {
-                    content: ClipboardContent::Files(paths),
-                    preview,
-                    truncated: false,
-                    source_app: None,
-                    source_title: None,
-                }));
-            }
-        }
+        // 用户反馈实际使用中没有用到该功能，按要求先注释停用。
+        // 文件条目「只记路径引用」，源文件移动/删除后容易失效，维护成本高。
+        // 重新启用：取消下面整段注释即可（写入侧同样有对应注释）。
+        //
+        // if let Ok(files) = cb.get().file_list() {
+        //     if !files.is_empty() {
+        //         let paths: Vec<String> = files
+        //             .iter()
+        //             .map(|path| path.to_string_lossy().to_string())
+        //             .collect();
+        //         log::info!("clipboard linux: kind=files count={}", paths.len());
+        //         let preview = if paths.len() == 1 {
+        //             paths[0].clone()
+        //         } else {
+        //             format!("{} 个文件", paths.len())
+        //         };
+        //         let (preview, _) = truncate_chars(&preview, PREVIEW_MAX_CHARS);
+        //         return Ok(Some(ClipboardEntry {
+        //             content: ClipboardContent::Files(paths),
+        //             preview,
+        //             truncated: false,
+        //             source_app: None,
+        //             source_title: None,
+        //         }));
+        //     }
+        // }
+        // ============================================================
 
         // 其次读文本
         if let Ok(text) = cb.get_text() {
@@ -894,12 +897,14 @@ mod linux_impl {
                 })?;
             }
             ClipboardContent::Files(files) => {
-                // Linux 用 text/uri-list 表示为文件列表，让目标程序能识别为「文件」
-                let paths: Vec<std::path::PathBuf> =
-                    files.iter().map(std::path::PathBuf::from).collect();
-                cb.set().file_list(&paths).map_err(|e| {
-                    AppError::Internal(format!("clipboard file write failed: {}", e))
-                })?;
+                // 【暂时停用】文件列表写回（text/uri-list）
+                //
+                // 捕获侧已停用，新条目不会再产生 Files 类型。这里保留降级：
+                // 旧条目粘贴时把路径写成纯文本，至少保证剪贴板有内容可用。
+                // 重新启用：把下面两行替换回 `cb.set().file_list(&paths)`。
+                let text = files.join("\n");
+                cb.set_text(text)
+                    .map_err(|e| AppError::Internal(format!("clipboard write failed: {}", e)))?;
             }
         }
 
