@@ -708,6 +708,24 @@ mod linux_impl {
         result
     }
 
+    /// HTML → 纯文本预览（去标签，截断到预览上限）
+    pub(super) fn html_to_preview(html: &str) -> String {
+        let mut result = String::new();
+        let mut in_tag = false;
+        for ch in html.chars() {
+            match ch {
+                '<' => in_tag = true,
+                '>' => in_tag = false,
+                _ if !in_tag => result.push(ch),
+                _ => {}
+            }
+            if result.chars().count() >= PREVIEW_MAX_CHARS {
+                break;
+            }
+        }
+        result.trim().to_string()
+    }
+
     pub fn read_clipboard_content_linux() -> Result<Option<ClipboardEntry>, AppError> {
         let mut clipboard = get_clipboard()?;
         let cb = clipboard.as_mut().ok_or(AppError::ClipboardRead)?;
@@ -715,6 +733,12 @@ mod linux_impl {
         // 优先读文本
         if let Ok(text) = cb.get_text() {
             if !text.is_empty() {
+                // 诊断日志：只记类型与长度，不记内容（AGENTS.md §10）
+                log::info!(
+                    "clipboard linux: kind=text len={}, lines={}",
+                    text.len(),
+                    text.lines().count()
+                );
                 let (text, truncated) = truncate_bytes(&text, TEXT_MAX_BYTES);
                 let (preview, _) = truncate_chars(&text, PREVIEW_MAX_CHARS);
                 return Ok(Some(ClipboardEntry {
@@ -727,8 +751,24 @@ mod linux_impl {
             }
         }
 
+        // 富文本：arboard 公开 API 支持 HTML（text/html）
+        if let Ok(html) = cb.get().html() {
+            if !html.is_empty() {
+                log::info!("clipboard linux: kind=html len={}", html.len());
+                let preview = html_to_preview(&html);
+                return Ok(Some(ClipboardEntry {
+                    content: ClipboardContent::Html(html),
+                    preview,
+                    truncated: false,
+                    source_app: None,
+                    source_title: None,
+                }));
+            }
+        }
+
         // 尝试读图片
         if let Ok(img) = cb.get_image() {
+            log::info!("clipboard linux: kind=image {}x{}", img.width, img.height);
             let bytes = img.bytes.into_owned();
             if bytes.len() > IMAGE_MAX_BYTES {
                 return Ok(Some(ClipboardEntry {
@@ -791,11 +831,19 @@ mod linux_impl {
         let cb = clipboard.as_mut().ok_or(AppError::ClipboardRead)?;
 
         match content {
-            ClipboardContent::Text(text)
-            | ClipboardContent::Html(text)
-            | ClipboardContent::Rtf(text) => {
+            ClipboardContent::Text(text) | ClipboardContent::Rtf(text) => {
                 cb.set_text(text.clone())
                     .map_err(|e| AppError::Internal(format!("clipboard write failed: {}", e)))?;
+            }
+            ClipboardContent::Html(html) => {
+                // 写入 HTML，同时提供纯文本回退（不支持富文本的目标可用）
+                let alt = html_to_preview(html);
+                if cb.set().html(html.clone(), Some(alt.clone())).is_err() {
+                    // 富文本写入失败时退回纯文本，保证剪贴板可用
+                    cb.set_text(alt).map_err(|e| {
+                        AppError::Internal(format!("clipboard write failed: {}", e))
+                    })?;
+                }
             }
             ClipboardContent::Image { data, .. } => {
                 if data.is_empty() {
@@ -855,5 +903,12 @@ mod tests {
         // 测试序列号生成不会崩溃
         let result = get_sequence_number();
         assert!(result.is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn html预览去掉标签() {
+        let preview = linux_impl::html_to_preview("<p>你好 <b>世界</b></p>");
+        assert_eq!(preview, "你好 世界");
     }
 }
