@@ -7,14 +7,17 @@ use tauri::{
 };
 
 pub fn setup_tray(app: &AppHandle) -> Result<(), AppError> {
+    log::info!("setup_tray: starting");
     // 托盘使用独立图标（`icons/tray.png`）：透明背景的蓝色圆角块 + 白色闪电
     let icon = tauri::image::Image::from_bytes(include_bytes!("../../icons/tray.png"))
         .map_err(|error| AppError::Internal(format!("failed to load tray icon: {}", error)))?;
+    log::info!("setup_tray: icon loaded");
 
     let open_settings = MenuItem::with_id(app, "open_settings", "设置", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
 
     let menu = Menu::with_items(app, &[&open_settings, &quit])?;
+    log::info!("setup_tray: menu created");
 
     TrayIconBuilder::new()
         .icon(icon)
@@ -48,6 +51,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), AppError> {
             }
         })
         .build(app)?;
+    log::info!("setup_tray: icon built and registered");
 
     Ok(())
 }

@@ -25,6 +25,8 @@ log = "0.4"
 dirs = "5"
 rusqlite = { version = "0.31", features = ["bundled"] }
 sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -43,6 +45,11 @@ windows = { version = "0.58", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Registry",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = "3"
+enigo = "0.2"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [features]
 default = ["custom-protocol"]

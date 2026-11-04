@@ -264,11 +264,14 @@ pub fn detail_to_content(detail: &ClipboardDetail) -> Result<ClipboardContent, A
                     detail.byte_size, e
                 ))
             })?;
+            #[cfg(target_os = "windows")]
             let format = if path.to_ascii_lowercase().ends_with(".dib") {
                 ImageFormat::Dib
             } else {
                 ImageFormat::Png
             };
+            #[cfg(not(target_os = "windows"))]
+            let format = ImageFormat::Png;
             Ok(ClipboardContent::Image { data, format })
         }
     }

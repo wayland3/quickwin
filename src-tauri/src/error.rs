@@ -44,6 +44,7 @@ impl From<tauri::Error> for AppError {
     }
 }
 
+#[cfg(target_os = "windows")]
 impl From<windows::core::Error> for AppError {
     fn from(err: windows::core::Error) -> Self {
         AppError::Internal(err.to_string())

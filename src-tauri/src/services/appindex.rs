@@ -40,7 +40,8 @@ fn source_priority(source: &str) -> u8 {
 /// 非应用类快捷方式名称特征（卸载/说明类，不计入索引）
 const NON_APP_NAME_HINTS: [&str; 5] = ["uninstall", "卸载", "readme", "帮助", "help"];
 
-/// 可作为启动目标的可执行扩展名
+/// 可作为启动目标的可执行扩展名（Windows）
+#[cfg(target_os = "windows")]
 const EXECUTABLE_EXTENSIONS: [&str; 4] = ["exe", "bat", "cmd", "com"];
 
 /// 采集候选（过滤前）
@@ -154,16 +155,31 @@ fn is_usable(candidate: &AppCandidate) -> bool {
         KIND_UWP => candidate.target.contains('!'),
         _ => {
             let path = Path::new(&candidate.target);
-            path.is_file()
-                && path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .map(|ext| {
-                        EXECUTABLE_EXTENSIONS
-                            .iter()
-                            .any(|allowed| ext.eq_ignore_ascii_case(allowed))
-                    })
-                    .unwrap_or(false)
+
+            #[cfg(target_os = "windows")]
+            {
+                path.is_file()
+                    && path
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| {
+                            EXECUTABLE_EXTENSIONS
+                                .iter()
+                                .any(|allowed| ext.eq_ignore_ascii_case(allowed))
+                        })
+                        .unwrap_or(false)
+            }
+
+            #[cfg(target_os = "linux")]
+            {
+                // Linux 检查文件是否存在且可执行
+                use std::os::unix::fs::PermissionsExt;
+                path.is_file()
+                    && path
+                        .metadata()
+                        .map(|m| m.permissions().mode() & 0o111 != 0)
+                        .unwrap_or(false)
+            }
         }
     }
 }
@@ -224,6 +240,7 @@ pub fn collect() -> AppIndexScan {
 }
 
 /// 开始菜单目录（当前用户 + 全局）
+#[cfg(target_os = "windows")]
 pub fn start_menu_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(appdata) = std::env::var_os("APPDATA") {
@@ -232,6 +249,33 @@ pub fn start_menu_dirs() -> Vec<PathBuf> {
     if let Some(program_data) = std::env::var_os("ProgramData") {
         dirs.push(PathBuf::from(program_data).join("Microsoft\\Windows\\Start Menu\\Programs"));
     }
+    dirs
+}
+
+/// 应用目录（Linux XDG 标准）
+#[cfg(target_os = "linux")]
+pub fn start_menu_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    // 系统级
+    dirs.push(PathBuf::from("/usr/share/applications"));
+    dirs.push(PathBuf::from("/usr/local/share/applications"));
+
+    // 用户级
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".local/share/applications"));
+    }
+
+    // XDG_DATA_DIRS
+    if let Ok(xdg_dirs) = std::env::var("XDG_DATA_DIRS") {
+        for dir in xdg_dirs.split(':') {
+            let path = PathBuf::from(dir).join("applications");
+            if !dirs.contains(&path) {
+                dirs.push(path);
+            }
+        }
+    }
+
     dirs
 }
 
@@ -264,10 +308,20 @@ fn walk_shortcuts(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 }
 
 fn is_shortcut(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.eq_ignore_ascii_case("lnk"))
-        .unwrap_or(false)
+    #[cfg(target_os = "windows")]
+    {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("lnk"))
+            .unwrap_or(false)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("desktop"))
+            .unwrap_or(false)
+    }
 }
 
 fn start_menu_candidate(shortcut: ResolvedShortcut) -> AppCandidate {
@@ -565,6 +619,12 @@ mod tests {
         let zeta = dir.join("zeta.exe");
         for path in [&alpha, &beta, &zeta] {
             std::fs::write(path, b"test").expect("write temp exe");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+                    .expect("set executable");
+            }
         }
 
         let rows = build_index(vec![

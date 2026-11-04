@@ -1858,10 +1858,14 @@ mod tests {
     #[allow(non_snake_case)]
     fn 超大图片只记录标记条目() {
         let mut storage = open_test_storage();
+        #[cfg(target_os = "windows")]
+        let format = ImageFormat::Dib;
+        #[cfg(not(target_os = "windows"))]
+        let format = ImageFormat::Raw;
         let entry = ClipboardEntry {
             content: ClipboardContent::Image {
                 data: Vec::new(),
-                format: ImageFormat::Dib,
+                format,
             },
             preview: "[图片过大]".to_string(),
             truncated: true,

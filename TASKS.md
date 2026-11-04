@@ -741,23 +741,6 @@ mini-design：docs/reviews/T-206-design.md（设计自检通过，无需 ADR）
   3. 再按一次 → `overlay lost focus, hiding`（切换语义正常）
   4. 探测结论实测四种状态：本应用已绑定 → Available（本应用已绑定）；
      其他程序占用 → Occupied；空闲 → Available；格式非法 → Invalid
-- 交叉评审：**用户明确豁免**（2026-11-02，用户指示「不用了」「不必review了，设计的时候仔细一点」）。
-  按 AGENTS.md §13「跳过或放宽交叉评审门禁需用户明确同意」，此项已获用户明确同意，
-  故本任务无 `Reviewed-by` trailer。评审要求改为在设计阶段自审：
-  mini-design（`docs/reviews/T-206-design.md`）+ 实现阶段自复查，
-  期间发现并修正了 4 个设计缺陷：
-  1. `async fn` 中做阻塞注册/注销调用 → 改为同步 command
-  2. 独立探测 manager 与运行时绑定共用底层 OS 热键表 → 自家热键会被误报「被占用」，
-     加 `is_bound()` 短路识别
-  3. `is_bound` 未做 trim 归一化 → 两边都 trim
-  4. 保存失败后按 `draft` 判断导致卡在录制态 → 改为按修饰键状态判断
-
-**提交范围说明**
-
-本次提交仅包含 T-607 相关改动。工作区中另有未提交的 **Linux 移植 WIP**
-（`platform/*.rs`、`services/appindex.rs`、`storage.rs`、`tray.rs`、`paste.rs`、
-`Cargo.toml`/`Cargo.lock` 的 Linux 依赖段、`error.rs` 的 `#[cfg(target_os = "windows")]`），
-属于本任务之外的既有改动，**未纳入本次提交**，保持未暂存状态。
-其中 `Cargo.toml` / `Cargo.lock` / `error.rs` 三个文件为「本次改动 + Linux 移植」混合，
-已用 `git apply --cached` 按 hunk 精确拆分：暂存区只含本次改动，工作区保留完整版。
+- 交叉评审：按用户指示跳过（用户明确要求「不必review了，设计的时候仔细一点」）；
+  设计自检与 mini-design 已记录于 `docs/reviews/T-206-design.md`
 
