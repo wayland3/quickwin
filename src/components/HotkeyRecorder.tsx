@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { eventToAccelerator } from '../lib/keys';
+import { eventToAccelerator, isSuperKeyName } from '../lib/keys';
 import { ipc } from '../lib/ipc';
+
+/** 非 Win 的修饰键按键名（按住时只等主键，不做处理） */
+const MODIFIER_KEY_NAMES = new Set(['Control', 'Alt', 'Shift']);
 
 interface HotkeyRecorderProps {
   /** 当前保存的热键值 */
@@ -44,6 +47,8 @@ export function HotkeyRecorder({
   const recordingRef = useRef(false);
   /** 最近一次按键后是否已有主键（用于失焦兜底判断） */
   const gotMainKeyRef = useRef(false);
+  /** Win/Super 键是否处于按住状态（Linux 上主键事件的 metaKey 可能不置位） */
+  const superHeldRef = useRef(false);
 
   useEffect(() => {
     recordingRef.current = isRecording;
@@ -55,6 +60,7 @@ export function HotkeyRecorder({
     setDraft(null);
     setError(null);
     gotMainKeyRef.current = false;
+    superHeldRef.current = false;
 
     // 暂停全局热键，避免录制时误触发
     try {
@@ -71,6 +77,7 @@ export function HotkeyRecorder({
     setIsRecording(false);
     setDraft(null);
     gotMainKeyRef.current = false;
+    superHeldRef.current = false;
 
     if (blurTimeoutRef.current !== null) {
       window.clearTimeout(blurTimeoutRef.current);
@@ -120,6 +127,20 @@ export function HotkeyRecorder({
       event.preventDefault();
       event.stopPropagation();
 
+      // Win/Super 键本身：只记住「按住」状态，不算主键
+      //
+      // Linux 上按 Win 会立刻让窗口失焦，且后续主键事件的 metaKey 可能为 false。
+      // 记住这个状态，构造组合时补上 Super。
+      if (isSuperKeyName(event.key)) {
+        superHeldRef.current = true;
+        return;
+      }
+
+      if (MODIFIER_KEY_NAMES.has(event.key)) {
+        // 其他修饰键只等主键，不做任何事
+        return;
+      }
+
       if (event.key === 'Escape') {
         void stopRecording();
         return;
@@ -130,7 +151,9 @@ export function HotkeyRecorder({
         return;
       }
 
-      const accelerator = eventToAccelerator(event);
+      const accelerator = eventToAccelerator(event, {
+        superHeld: superHeldRef.current,
+      });
       if (accelerator) {
         gotMainKeyRef.current = true;
         setDraft(accelerator);
@@ -140,11 +163,18 @@ export function HotkeyRecorder({
 
     // 修饰键全部松开 → 退出录制态
     //
-    // 保存成功时 saveHotkey 已停止录制；这里主要兜底「保存失败」与
+    // 保存成功时 saveHotkey 已停止录制；这里兜底「保存失败」与
     // 「只按了修饰键就松手」两种情况，避免卡在录制态。错误提示保留。
     const onKeyUp = (event: KeyboardEvent) => {
+      if (isSuperKeyName(event.key)) {
+        superHeldRef.current = false;
+      }
       const modifierStillHeld =
-        event.ctrlKey || event.altKey || event.shiftKey || event.metaKey;
+        event.ctrlKey ||
+        event.altKey ||
+        event.shiftKey ||
+        event.metaKey ||
+        superHeldRef.current;
       if (modifierStillHeld) return;
       void stopRecording();
     };
@@ -159,7 +189,7 @@ export function HotkeyRecorder({
 
   // 失焦兜底：延迟退出，给用户按主键的时间
   //
-  // Linux 上按 Win 必然失焦；500ms 内若没有拿到主键才退出。
+  // Linux 上按 Win 必然失焦；800ms 内若没有拿到主键才退出。
   const handleBlur = useCallback(() => {
     if (!isRecording) return;
 
@@ -170,10 +200,10 @@ export function HotkeyRecorder({
     blurTimeoutRef.current = window.setTimeout(() => {
       blurTimeoutRef.current = null;
       if (!recordingRef.current) return;
-      // 已拿到主键（组合已保存）或仍在按修饰键：不退出
-      if (gotMainKeyRef.current || draft) return;
+      // 已拿到主键、或 Win 键仍按住：不退出，继续等主键
+      if (gotMainKeyRef.current || superHeldRef.current || draft) return;
       void stopRecording();
-    }, 500);
+    }, 800);
   }, [isRecording, draft, stopRecording]);
 
   // 组件卸载时确保恢复热键

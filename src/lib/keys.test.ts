@@ -64,6 +64,14 @@ describe('keys', () => {
       expect(eventToAccelerator(event)).toBe('Super+Space');
     });
 
+    it('Linux 上 metaKey 不置位时，靠 superHeld 兜底补上 Super', () => {
+      // 部分 X11 桌面按住 Win 时，主键事件的 metaKey 可能为 false
+      const event = makeKeyEvent(' ', { meta: false });
+      expect(eventToAccelerator(event, { superHeld: true })).toBe('Super+Space');
+      // 没按住 Win 时不应凭空加 Super
+      expect(eventToAccelerator(event, { superHeld: false })).toBeNull();
+    });
+
     it('只有修饰键返回 null', () => {
       const event = makeKeyEvent('Control', { ctrl: true });
       expect(eventToAccelerator(event)).toBeNull();

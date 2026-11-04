@@ -54,7 +54,10 @@ const KEY_MAP: Record<string, string> = {
  * @param event 键盘事件
  * @returns accelerator 字符串，如果无效则返回 null
  */
-export function eventToAccelerator(event: KeyboardEvent): string | null {
+export function eventToAccelerator(
+  event: KeyboardEvent,
+  options: { superHeld?: boolean } = {},
+): string | null {
   const modifiers: string[] = [];
   let mainKey = '';
 
@@ -62,10 +65,15 @@ export function eventToAccelerator(event: KeyboardEvent): string | null {
   if (event.ctrlKey) modifiers.push('Ctrl');
   if (event.altKey) modifiers.push('Alt');
   if (event.shiftKey) modifiers.push('Shift');
-  // Win/Super：优先用 metaKey；Linux X11 上个别环境不置 metaKey，
-  // 此时按 event.key 是否属于 Super 系按键兜底
-  if (event.metaKey || keyIsSuper(event.key)) modifiers.push('Super');
-  // 去重（metaKey 与 key 兜底可能同时命中）
+  // Win/Super：三种来源任一命中即算
+  //   1) event.metaKey（标准）
+  //   2) event.key 本身是 Super 系（按下的就是 Win 键）
+  //   3) options.superHeld（调用方记住「Win 键已按住」，解决 Linux 上
+  //      按主键时 metaKey 可能不置位的情况）
+  if (event.metaKey || keyIsSuper(event.key) || options.superHeld === true) {
+    modifiers.push('Super');
+  }
+  // 去重（多个来源可能同时命中）
   const uniqueModifiers = Array.from(new Set(modifiers));
 
   // 获取主键（排除修饰键本身）
@@ -106,6 +114,11 @@ export function eventToAccelerator(event: KeyboardEvent): string | null {
  */
 function keyIsSuper(key: string): boolean {
   return key === 'Super' || key === 'OS' || key === 'Win' || key === 'Hyper';
+}
+
+/** 判断按键名是否为 Win/Super 键（导出给录制器判断「Win 是否被按住」） */
+export function isSuperKeyName(key: string): boolean {
+  return keyIsSuper(key);
 }
 
 /**

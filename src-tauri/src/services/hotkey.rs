@@ -661,3 +661,36 @@ mod tests {
         assert!(err.contains("不是有效的组合键"));
     }
 }
+
+#[cfg(test)]
+mod probe_manual {
+    use super::*;
+
+    /// 真机探测：X11 桌面上各组合键的实际占用情况。
+    ///
+    /// 运行：`cargo test --lib 真机探测热键可用性 -- --ignored --nocapture`
+    #[test]
+    #[allow(non_snake_case)]
+    #[ignore = "真机手测：需要可用的 X11 会话"]
+    fn 真机探测热键可用性() {
+        let manager = HotkeyManager::new();
+        let candidates = [
+            "Super+Space",
+            "Alt+Space",
+            "Super+J",
+            "Super+V",
+            "Alt+J",
+            "Ctrl+Alt+Space",
+            "Ctrl+Super+Space",
+        ];
+        for acc in candidates {
+            match manager.probe(acc) {
+                Ok(result) => println!(
+                    "{:<18} => available={} reason={:?} msg={}",
+                    acc, result.available, result.reason, result.message
+                ),
+                Err(e) => println!("{:<18} => ERROR {:?}", acc, e),
+            }
+        }
+    }
+}
