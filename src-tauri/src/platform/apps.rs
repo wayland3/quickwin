@@ -19,6 +19,10 @@ pub struct ResolvedShortcut {
     pub args: Option<String>,
     /// 图标位置，`path` 或 `path,index`
     pub icon_path: Option<String>,
+    /// 平台提供的人类可读显示名（Linux 取 `.desktop` 的 `Name`，Windows 为 `None`）
+    pub display_name: Option<String>,
+    /// 平台提供的其它可搜索名称（Linux 为 `.desktop` 的其它 `Name[*]` 变体）
+    pub aliases: Vec<String>,
 }
 
 /// 批量解析结果
@@ -189,6 +193,9 @@ mod windows_impl {
             target: PathBuf::from(target),
             args,
             icon_path,
+            // Windows 的显示名由调用方从快捷方式文件名推导
+            display_name: None,
+            aliases: Vec::new(),
         })
     }
 
@@ -609,11 +616,26 @@ mod linux_impl {
         for path in paths {
             match parse_desktop_file(path) {
                 Some(entry) => {
+                    // Exec 需拆成「程序 + 参数」，并把裸命令名解析为绝对路径；
+                    // 解析不到可执行文件时该条目无法启动，直接跳过。
+                    let Some((program, args)) = split_exec(&entry.exec) else {
+                        scan.failed += 1;
+                        continue;
+                    };
+                    let Some(target) = resolve_program(&program) else {
+                        scan.failed += 1;
+                        continue;
+                    };
+
                     scan.resolved.push(ResolvedShortcut {
                         link: path.clone(),
-                        target: PathBuf::from(&entry.exec),
-                        args: None,
+                        target,
+                        args,
                         icon_path: entry.icon.clone(),
+                        // 用 `.desktop` 的 Name 作为显示名，避免暴露
+                        // `com.alibabainc.dingtalk` 这类文件名（钉钉应显示为「钉钉」）
+                        display_name: Some(entry.name),
+                        aliases: entry.aliases,
                     });
                 }
                 None => scan.failed += 1,
@@ -623,7 +645,7 @@ mod linux_impl {
         Ok(scan)
     }
 
-    /// 读取 App Paths（Linux 用 .desktop 文件替代）
+    /// 读取 App Paths（Linux 用 .desktop 文件替代），名称取 `.desktop` 的 `Name`
     pub fn list_app_paths() -> Vec<AppPathEntry> {
         let dirs = app_dirs();
         let mut entries = Vec::new();
@@ -637,12 +659,19 @@ mod linux_impl {
                     let path = file.path();
                     if path.extension().and_then(|e| e.to_str()) == Some("desktop") {
                         if let Some(entry) = parse_desktop_file(&path) {
-                            if !entry.no_display {
-                                entries.push(AppPathEntry {
-                                    name: entry.name,
-                                    target: PathBuf::from(&entry.exec),
-                                });
+                            if entry.no_display {
+                                continue;
                             }
+                            let Some((program, _args)) = split_exec(&entry.exec) else {
+                                continue;
+                            };
+                            let Some(target) = resolve_program(&program) else {
+                                continue;
+                            };
+                            entries.push(AppPathEntry {
+                                name: entry.name,
+                                target,
+                            });
                         }
                     }
                 }
@@ -663,12 +692,14 @@ mod linux_impl {
     }
 
     /// 启动 Win32 应用（Linux 用 std::process::Command）
+    ///
+    /// 后台启动：子进程独立于本进程，不阻塞退出。
+    /// 注意不要把 `&` 当参数传给目标程序（那是 shell 的后台语法）。
     pub fn launch_win32(target: &str, args: Option<&str>) -> Result<(), AppError> {
         let mut cmd = std::process::Command::new(target);
         if let Some(args_str) = args {
             cmd.args(args_str.split_whitespace());
         }
-        cmd.arg("&"); // 后台运行
 
         cmd.spawn()
             .map_err(|e| AppError::LaunchFailed(format!("启动失败: {}", e)))?;
@@ -683,7 +714,10 @@ mod linux_impl {
 
     /// .desktop 文件解析结果
     struct DesktopEntry {
+        /// 显示名（本地化优先）
         name: String,
+        /// 其它可搜索名称（通用 Name、其它本地化 Name、desktop 文件名由调用方补充）
+        aliases: Vec<String>,
         exec: String,
         icon: Option<String>,
         no_display: bool,
@@ -693,7 +727,9 @@ mod linux_impl {
     fn parse_desktop_file(path: &Path) -> Option<DesktopEntry> {
         let content = fs::read_to_string(path).ok()?;
 
-        let mut name = None;
+        let mut general_name: Option<String> = None;
+        let mut zh_name: Option<String> = None;
+        let mut other_names: Vec<String> = Vec::new();
         let mut exec = None;
         let mut icon = None;
         let mut no_display = false;
@@ -720,40 +756,181 @@ mod linux_impl {
 
             // 解析键值对
             if let Some((key, value)) = line.split_once('=') {
-                match key.trim() {
-                    "Name" => name = Some(value.trim().to_string()),
-                    "Exec" => {
-                        // Exec 可能包含 %f %u 等占位符，移除
-                        let exec_str = value.trim();
-                        let cleaned = exec_str
-                            .split_whitespace()
-                            .filter(|s| !s.starts_with('%'))
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        exec = Some(cleaned);
+                let key = key.trim();
+                let value = value.trim().to_string();
+                if value.is_empty() {
+                    continue;
+                }
+                match key {
+                    // 中文系统优先显示中文名（「钉钉」而不是「DingTalk」）
+                    "Name[zh_CN]" | "Name[zh_TW]" | "Name[zh_HK]" => {
+                        if zh_name.is_none() {
+                            zh_name = Some(value);
+                        } else {
+                            other_names.push(value);
+                        }
                     }
-                    "Icon" => icon = Some(value.trim().to_string()),
-                    "NoDisplay" => no_display = value.trim() == "true",
+                    // 其它语言变体统一收集为别名
+                    _ if key.starts_with("Name[") => other_names.push(value),
+                    "Name" => general_name = Some(value),
+                    "Exec" => {
+                        // 保留原始命令行，拆分与占位符过滤由 split_exec 负责
+                        exec = Some(value);
+                    }
+                    "Icon" => icon = Some(value),
+                    "NoDisplay" => no_display = value == "true",
                     _ => {}
                 }
             }
         }
 
-        // 必须有 Name 和 Exec
-        let name = name?;
-        let exec = exec?;
+        let display = zh_name
+            .clone()
+            .or_else(|| general_name.clone())
+            .or_else(|| other_names.first().cloned())?;
 
-        // 跳过空 Exec
+        // 除显示名以外的所有名字都作为别名（多对一：每个名字都能搜到）
+        let mut aliases: Vec<String> = Vec::new();
+        for candidate in general_name
+            .iter()
+            .chain(zh_name.iter())
+            .chain(other_names.iter())
+        {
+            if candidate != &display && !aliases.iter().any(|existing| existing == candidate) {
+                aliases.push(candidate.clone());
+            }
+        }
+
+        let exec = exec?;
         if exec.is_empty() {
             return None;
         }
 
         Some(DesktopEntry {
-            name,
+            name: display,
+            aliases,
             exec,
             icon,
             no_display,
         })
+    }
+
+    /// 拆分 `.desktop` 的 `Exec=` 行为「程序 + 参数」
+    ///
+    /// `Exec` 是 shell 风格的命令行，程序名可能是绝对路径（`/usr/bin/xterm`），
+    /// 也可能是裸命令名（`xterm`，需按 `PATH` 解析）。参数必须与程序分离：
+    /// 把参数粘在路径上会让 `Path::is_file()` 判定失败，应用会被过滤掉。
+    fn split_exec(exec: &str) -> Option<(String, Option<String>)> {
+        let mut program = String::new();
+        let mut args: Vec<String> = Vec::new();
+
+        for token in tokenize_exec(exec) {
+            if program.is_empty() {
+                program = token;
+                continue;
+            }
+            args.push(token);
+        }
+
+        if program.is_empty() {
+            return None;
+        }
+
+        let args = if args.is_empty() {
+            None
+        } else {
+            Some(args.join(" "))
+        };
+
+        Some((program, args))
+    }
+
+    /// 按空白切分 `Exec`，保持引号内的空格，过滤 `%f` `%U` 等占位符
+    fn tokenize_exec(exec: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+        let mut current = String::new();
+        let mut in_quotes = false;
+        let mut has_token = false;
+
+        for ch in exec.chars() {
+            match ch {
+                '"' => {
+                    in_quotes = !in_quotes;
+                    has_token = true;
+                }
+                c if c.is_whitespace() && !in_quotes => {
+                    if has_token {
+                        tokens.push(std::mem::take(&mut current));
+                        has_token = false;
+                    }
+                }
+                c => {
+                    current.push(c);
+                    has_token = true;
+                }
+            }
+        }
+
+        if has_token {
+            tokens.push(current);
+        }
+
+        tokens
+            .into_iter()
+            .filter(|token| !is_exec_placeholder(token))
+            .collect()
+    }
+
+    /// 判断是否为 Desktop Entry 占位符（`%f` `%U` `%%` 等）
+    fn is_exec_placeholder(token: &str) -> bool {
+        if token.len() < 2 {
+            return false;
+        }
+        if token == "%%" {
+            return true;
+        }
+        token.starts_with('%')
+            && token
+                .chars()
+                .skip(1)
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    }
+
+    /// 按 `PATH` 解析裸命令名，返回绝对路径
+    fn resolve_program(program: &str) -> Option<PathBuf> {
+        // 绝对路径：直接用
+        if program.starts_with('/') {
+            let path = PathBuf::from(program);
+            return path.is_file().then_some(path);
+        }
+
+        // 含路径分隔符的相对路径：相对当前目录解析
+        if program.contains('/') {
+            let path = PathBuf::from(program);
+            return path.is_file().then_some(path);
+        }
+
+        // 裸命令名：按 PATH 逐个目录查找
+        let path_env = std::env::var_os("PATH")?;
+        for dir in std::env::split_paths(&path_env) {
+            if dir.as_os_str().is_empty() {
+                continue;
+            }
+            let candidate = dir.join(program);
+            if candidate.is_file() && is_executable(&candidate) {
+                return Some(candidate);
+            }
+        }
+
+        None
+    }
+
+    /// 判断文件是否可执行
+    fn is_executable(path: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .map(|meta| meta.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
     }
 
     /// 获取应用目录列表
@@ -799,11 +976,50 @@ Type=Application
 
             let entry = parse_desktop_file(&temp).unwrap();
             assert_eq!(entry.name, "Firefox");
-            assert_eq!(entry.exec, "firefox");
+            // Exec 保留原始命令行，拆分与占位符过滤由 split_exec 负责
+            assert_eq!(entry.exec, "firefox %u");
             assert_eq!(entry.icon, Some("firefox".to_string()));
             assert!(!entry.no_display);
 
             fs::remove_file(&temp).ok();
+        }
+
+        #[test]
+        #[allow(non_snake_case)]
+        fn 中文本地化名称优先且其余名称作为别名() {
+            let content = r#"[Desktop Entry]
+Name=DingTalk
+Name[zh_CN]=钉钉
+Exec=/opt/apps/com.alibabainc.dingtalk/files/Elevator.sh %u
+Icon=dingtalk
+"#;
+            let temp = std::env::temp_dir().join("dingtalk.desktop");
+            fs::write(&temp, content).unwrap();
+
+            let entry = parse_desktop_file(&temp).unwrap();
+            // 中文环境优先显示「钉钉」
+            assert_eq!(entry.name, "钉钉");
+            // 英文名保留为别名，仍可搜索
+            assert_eq!(entry.aliases, vec!["DingTalk".to_string()]);
+
+            fs::remove_file(&temp).ok();
+        }
+
+        #[test]
+        #[allow(non_snake_case)]
+        fn exec拆分与PATH解析() {
+            let (program, args) = split_exec("/usr/bin/code --new-window").unwrap();
+            assert_eq!(program, "/usr/bin/code");
+            assert_eq!(args, Some("--new-window".to_string()));
+
+            // 占位符被过滤
+            let (program, args) = split_exec("/usr/bin/xterm %U").unwrap();
+            assert_eq!(program, "/usr/bin/xterm");
+            assert_eq!(args, None);
+
+            // 裸命令名按 PATH 解析
+            assert!(resolve_program("sh").is_some());
+            assert!(resolve_program("definitely-not-a-real-binary").is_none());
         }
 
         #[test]

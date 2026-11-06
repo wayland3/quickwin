@@ -301,8 +301,11 @@ export function ClipboardPanel() {
 
   const moveBy = (delta: number) => {
     const list = itemsRef.current;
+    if (list.length === 0) return;
     const index = list.findIndex((item) => item.id === selectedIdRef.current);
-    const target = list[moveSelection(index, delta, list.length)];
+    // 循环导航：第一个按上键到最后一个，最后一个按下键到第一个
+    const nextIndex = (index + delta + list.length) % list.length;
+    const target = list[nextIndex];
     if (target) setSelectedId(target.id);
   };
 

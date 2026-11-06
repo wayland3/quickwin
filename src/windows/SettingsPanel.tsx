@@ -138,7 +138,7 @@ function GeneralTab({
           <div className="flex-1">
             <div className="text-sm font-medium text-[var(--text)]">开机自启</div>
             <div className="mt-1 text-xs text-[var(--text-muted)]">
-              启动时自动运行 QuickWin
+              启动时自动运行 Quick
             </div>
           </div>
           <label className="relative inline-flex cursor-pointer items-center">
@@ -556,14 +556,14 @@ function AboutTab() {
       
       <div className="space-y-4">
         <div className="rounded-lg border border-[var(--border)] p-4">
-          <div className="mb-2 text-sm font-medium text-[var(--text)]">QuickWin</div>
+          <div className="mb-2 text-sm font-medium text-[var(--text)]">Quick</div>
           <div className="text-xs text-[var(--text-muted)]">版本 0.1.0</div>
         </div>
 
         <div className="rounded-lg border border-[var(--border)] p-4">
           <div className="mb-2 text-sm font-medium text-[var(--text)]">数据目录</div>
           <div className="text-xs text-[var(--text-muted)]">
-            %APPDATA%\com.quickwin.app
+            ~/Library/Application Support/quick (macOS)
           </div>
         </div>
 
@@ -575,7 +575,7 @@ function AboutTab() {
         </div>
 
         <div className="rounded-lg bg-slate-500/10 px-4 py-3 text-xs text-slate-600">
-          QuickWin 是一个 Windows 常驻效率工具，提供启动器和剪贴板历史功能。
+          Quick 是一个跨平台常驻效率工具，提供启动器和剪贴板历史功能。
         </div>
       </div>
     </div>

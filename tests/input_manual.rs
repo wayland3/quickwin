@@ -11,7 +11,7 @@
 #[ignore]
 fn 手测_发送中文英文emoji() {
     // 运行此测试前，请打开记事本并确保焦点在编辑区
-    quickwin::platform::input::send_text("Hello 你好 😀").unwrap();
+    quick::platform::input::send_text("Hello 你好 😀").unwrap();
     // 验证：记事本中显示 "Hello 你好 😀"
 }
 
@@ -20,7 +20,7 @@ fn 手测_发送中文英文emoji() {
 fn 手测_连续发送100次() {
     // 运行此测试前，请打开记事本并确保焦点在编辑区
     for i in 0..100 {
-        quickwin::platform::input::send_text(&format!("第 {} 次\n", i + 1)).unwrap();
+        quick::platform::input::send_text(&format!("第 {} 次\n", i + 1)).unwrap();
     }
     // 验证：记事本中显示 100 行，无丢失、无重复
 }
@@ -29,7 +29,7 @@ fn 手测_连续发送100次() {
 #[ignore]
 fn 手测_Ctrl_C() {
     // 运行此测试前，请在记事本中选中文本
-    quickwin::platform::input::send_copy().unwrap();
+    quick::platform::input::send_copy().unwrap();
     // 验证：剪贴板中包含选中文本
 }
 
@@ -37,7 +37,7 @@ fn 手测_Ctrl_C() {
 #[ignore]
 fn 手测_Ctrl_V() {
     // 运行此测试前，请先复制一些文本到剪贴板
-    quickwin::platform::input::send_paste().unwrap();
+    quick::platform::input::send_paste().unwrap();
     // 验证：记事本中粘贴了剪贴板内容
 }
 
@@ -46,6 +46,6 @@ fn 手测_Ctrl_V() {
 fn 手测_管理员窗口() {
     // 运行此测试前，请以管理员身份打开记事本
     // 预期：返回 AppError::ElevatedTarget
-    let result = quickwin::platform::input::send_text("test");
-    assert!(matches!(result, Err(quickwin::error::AppError::ElevatedTarget)));
+    let result = quick::platform::input::send_text("test");
+    assert!(matches!(result, Err(quick::error::AppError::ElevatedTarget)));
 }

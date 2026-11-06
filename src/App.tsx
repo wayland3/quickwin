@@ -178,7 +178,7 @@ function App() {
         <LauncherPanel />
       ) : (
         <div className="qw-placeholder">
-          <h1 className="mb-4 text-4xl font-bold">QuickWin</h1>
+          <h1 className="mb-4 text-4xl font-bold">Quick</h1>
           <p className="mb-2 text-slate-400">脚手架已就绪，等待业务开发</p>
           {mode && <p className="mt-4 text-sm text-blue-400">当前模式：{mode}</p>}
           {pingResult && (

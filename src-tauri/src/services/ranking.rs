@@ -134,8 +134,15 @@ pub fn rank_apps(
         let match_score = if normalized.is_empty() {
             1.0
         } else {
-            match match_query(&normalized, &row.name) {
-                Some((_, score)) => score,
+            // 多对一：显示名与任一别名命中都算，取最高分
+            let mut best: Option<f64> = None;
+            for candidate in std::iter::once(&row.name).chain(row.aliases.iter()) {
+                if let Some((_, score)) = match_query(&normalized, candidate) {
+                    best = Some(best.map_or(score, |current| current.max(score)));
+                }
+            }
+            match best {
+                Some(score) => score,
                 None => continue,
             }
         };
@@ -188,6 +195,14 @@ mod tests {
             kind: "win32".to_string(),
             source: source.to_string(),
             icon_path: None,
+            aliases: Vec::new(),
+        }
+    }
+
+    fn row_with_aliases(key: &str, name: &str, aliases: &[&str]) -> AppIndexRow {
+        AppIndexRow {
+            aliases: aliases.iter().map(|alias| alias.to_string()).collect(),
+            ..row(key, name, "app_paths")
         }
     }
 
@@ -312,6 +327,26 @@ mod tests {
 
         let items = rank_apps("", &rows, &stats, now, 12);
         assert_eq!(items[0].key, "a.exe");
+    }
+
+    #[test]
+    fn 通过别名也能搜索到应用() {
+        let now = 1_000_000_000_000i64;
+        let rows = vec![row_with_aliases(
+            "dingtalk.exe",
+            "钉钉",
+            &["DingTalk", "com.alibabainc.dingtalk"],
+        )];
+        let stats = HashMap::new();
+
+        // 中文名、英文名、desktop 文件名都应命中同一应用
+        for query in ["钉钉", "dingtalk", "com.alibabainc.dingtalk", "ding"] {
+            let items = rank_apps(query, &rows, &stats, now, 12);
+            assert_eq!(items.len(), 1, "query={query} 应命中");
+            assert_eq!(items[0].key, "dingtalk.exe");
+        }
+        // 不相关的查询仍然不命中
+        assert!(rank_apps("wechat", &rows, &stats, now, 12).is_empty());
     }
 
     /// 真机抽查：`cargo test --lib 真机排序抽查 -- --ignored --nocapture`

@@ -1,8 +1,8 @@
 [package]
-name = "quickwin"
+name = "quick"
 version = "0.1.0"
-description = "Windows 常驻效率工具"
-authors = ["QuickWin Team"]
+description = "跨平台常驻效率工具"
+authors = ["Quick Team"]
 edition = "2021"
 
 [build-dependencies]

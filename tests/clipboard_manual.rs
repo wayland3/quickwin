@@ -12,12 +12,12 @@
 fn 手测_连续复制20次() {
     // 启动监听
     let app = tauri::test::mock_context();
-    let mut monitor = quickwin::services::clipboard::ClipboardMonitor::start(app.handle()).unwrap();
+    let mut monitor = quick::services::clipboard::ClipboardMonitor::start(app.handle()).unwrap();
     
     // 连续复制 20 次（间隔 < 30ms）
     for i in 0..20 {
-        quickwin::platform::input::send_text(&format!("测试 {}", i + 1)).unwrap();
-        quickwin::platform::input::send_copy().unwrap();
+        quick::platform::input::send_text(&format!("测试 {}", i + 1)).unwrap();
+        quick::platform::input::send_copy().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     
@@ -32,7 +32,7 @@ fn 手测_连续复制20次() {
 fn 手测_Excel占用剪贴板() {
     // 启动监听
     let app = tauri::test::mock_context();
-    let mut monitor = quickwin::services::clipboard::ClipboardMonitor::start(app.handle()).unwrap();
+    let mut monitor = quick::services::clipboard::ClipboardMonitor::start(app.handle()).unwrap();
     
     // 打开 Excel 并复制大表格（占用数秒）
     // 手动操作：打开 Excel，选择大表格，Ctrl+C
@@ -48,12 +48,12 @@ fn 手测_Excel占用剪贴板() {
 fn 手测_快速复制间隔小于30ms() {
     // 启动监听
     let app = tauri::test::mock_context();
-    let mut monitor = quickwin::services::clipboard::ClipboardMonitor::start(app.handle()).unwrap();
+    let mut monitor = quick::services::clipboard::ClipboardMonitor::start(app.handle()).unwrap();
     
     // 快速复制 50 次（间隔 10ms）
     for i in 0..50 {
-        quickwin::platform::input::send_text(&format!("快速 {}", i + 1)).unwrap();
-        quickwin::platform::input::send_copy().unwrap();
+        quick::platform::input::send_text(&format!("快速 {}", i + 1)).unwrap();
+        quick::platform::input::send_copy().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     
@@ -68,7 +68,7 @@ fn 手测_快速复制间隔小于30ms() {
 fn 手测_线程优雅关闭() {
     // 启动监听
     let app = tauri::test::mock_context();
-    let monitor = quickwin::services::clipboard::ClipboardMonitor::start(app.handle()).unwrap();
+    let monitor = quick::services::clipboard::ClipboardMonitor::start(app.handle()).unwrap();
     
     // 等待一段时间
     std::thread::sleep(std::time::Duration::from_secs(2));

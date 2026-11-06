@@ -1,11 +1,11 @@
 ---
 name: Feature Slice
-description: 按 TASKS.md 认领并完成 QuickWin 的单个任务（含读规格、实现、验证、回写进度）。在开发、修复或继续推进本项目时使用。
+description: 按 TASKS.md 认领并完成 Quick 的单个任务（含读规格、实现、验证、回写进度）。在开发、修复或继续推进本项目时使用。
 ---
 
 # 任务切片流程
 
-本技能定义 QuickWin 的**单任务工作流**。目标：一次只交付一个可验收的切片，不留半成品。
+本技能定义 Quick 的**单任务工作流**。目标：一次只交付一个可验收的切片，不留半成品。
 
 ## 何时使用
 
@@ -82,7 +82,7 @@ commands::xxx → services::xxx → platform::xxx
 2. 若自检发现需要 ADR 或涉及架构变更，用 `subagent` 调用评审模型（固定 `zai-org/glm-5`），提示词：
 
 ```
-你是 QuickWin 的设计评审员。请审查以下 mini-design，指出最大风险并给出改进建议。
+你是 Quick 的设计评审员。请审查以下 mini-design，指出最大风险并给出改进建议。
 
 任务：T-<id> <任务名称>
 验收标准：<从 TASKS.md 复制>
@@ -189,7 +189,7 @@ mini-design：
 **执行**：用 `subagent`，`agent: general`，`model: zai-org/glm-5`（固定评审模型，减少标准差异），提示词：
 
 ```
-你是 QuickWin 的代码评审员。请审查以下实现，按 BLOCKER / NONBLOCK 分类给出意见。
+你是 Quick 的代码评审员。请审查以下实现，按 BLOCKER / NONBLOCK 分类给出意见。
 
 任务：T-<id> <任务名称>
 评审级别：L1 / L2

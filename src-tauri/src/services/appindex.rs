@@ -54,6 +54,8 @@ pub struct AppCandidate {
     pub icon_path: Option<String>,
     pub kind: String,
     pub source: String,
+    /// 该应用的其他名字（同一 key 的所有来源合并）
+    pub aliases: Vec<String>,
 }
 
 /// 采集统计（不含任何路径或应用名，可安全写日志）
@@ -88,9 +90,36 @@ pub fn build_index(candidates: Vec<AppCandidate>) -> Vec<AppIndexRow> {
             continue;
         }
 
-        match chosen.get(&key) {
-            Some(existing) if prefer(existing, &candidate) => {}
-            _ => {
+        match chosen.get_mut(&key) {
+            Some(existing) => {
+                // 多对一：同一应用的所有来源名字都保留为别名，
+                // 无论哪个来源胜出显示名，其余名字仍可被搜索命中
+                for name in candidate
+                    .aliases
+                    .iter()
+                    .chain(std::iter::once(&candidate.name))
+                {
+                    let trimmed = name.trim();
+                    if !trimmed.is_empty() && !existing.aliases.iter().any(|a| a == trimmed) {
+                        existing.aliases.push(trimmed.to_string());
+                    }
+                }
+                if prefer(existing, &candidate) {
+                    // 保留现有
+                } else {
+                    let names = std::mem::take(&mut existing.aliases);
+                    *existing = candidate;
+                    existing.aliases = names;
+                    existing
+                        .aliases
+                        .retain(|name| name.trim() != existing.name.trim());
+                }
+            }
+            None => {
+                let mut candidate = candidate;
+                candidate
+                    .aliases
+                    .retain(|name| name.trim() != candidate.name.trim());
                 chosen.insert(key, candidate);
             }
         }
@@ -98,14 +127,30 @@ pub fn build_index(candidates: Vec<AppCandidate>) -> Vec<AppIndexRow> {
 
     let mut rows: Vec<AppIndexRow> = chosen
         .into_iter()
-        .map(|(key, candidate)| AppIndexRow {
-            key,
-            name: candidate.name.trim().to_string(),
-            target: candidate.target,
-            args: candidate.args,
-            kind: candidate.kind,
-            source: candidate.source,
-            icon_path: candidate.icon_path,
+        .map(|(key, candidate)| {
+            let name = candidate.name.trim().to_string();
+            // 别名去重并剔除与显示名相同的项
+            let aliases = candidate
+                .aliases
+                .into_iter()
+                .map(|alias| alias.trim().to_string())
+                .filter(|alias| !alias.is_empty() && alias != &name)
+                .fold(Vec::new(), |mut acc, alias| {
+                    if !acc.iter().any(|existing| existing == &alias) {
+                        acc.push(alias);
+                    }
+                    acc
+                });
+            AppIndexRow {
+                key,
+                name,
+                target: candidate.target,
+                args: candidate.args,
+                kind: candidate.kind,
+                source: candidate.source,
+                icon_path: candidate.icon_path,
+                aliases,
+            }
         })
         .collect();
 
@@ -325,15 +370,42 @@ fn is_shortcut(path: &Path) -> bool {
 }
 
 fn start_menu_candidate(shortcut: ResolvedShortcut) -> AppCandidate {
-    let name = shortcut
+    // 显示名优先用平台提供的可读名（Linux 的 `.desktop` `Name=`），
+    // 缺失时回退到快捷方式文件名。
+    let stem_name = shortcut
         .link
         .file_stem()
         .map(|stem| stem.to_string_lossy().to_string())
         .unwrap_or_default();
+    let name = shortcut
+        .display_name
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| stem_name.clone());
     let target = shortcut.target.to_string_lossy().to_string();
     let icon_path = shortcut
         .icon_path
         .or_else(|| (!target.is_empty()).then(|| target.clone()));
+
+    // 别名：desktop 文件名 + 可执行文件名 + `.desktop` 里的其它 Name 变体，
+    // 保证「钉钉」「DingTalk」「com.alibabainc.dingtalk」都能搜到同一应用
+    let mut aliases = Vec::new();
+    if !stem_name.trim().is_empty() && stem_name != name {
+        aliases.push(stem_name);
+    }
+    if let Some(target_stem) = std::path::Path::new(&target)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+    {
+        if !target_stem.trim().is_empty() && target_stem != name {
+            aliases.push(target_stem);
+        }
+    }
+    for alias in shortcut.aliases {
+        if !alias.trim().is_empty() && alias != name && !aliases.contains(&alias) {
+            aliases.push(alias);
+        }
+    }
 
     AppCandidate {
         name,
@@ -342,11 +414,20 @@ fn start_menu_candidate(shortcut: ResolvedShortcut) -> AppCandidate {
         icon_path,
         kind: KIND_WIN32.to_string(),
         source: SOURCE_START_MENU.to_string(),
+        aliases,
     }
 }
 
 fn app_path_candidate(entry: AppPathEntry) -> AppCandidate {
     let target = entry.target.to_string_lossy().to_string();
+    // 别名：可执行文件名（在 Linux 上常是 `elevator.sh` 之类，不是用户会输入的名字，
+    // 但保留可以覆盖「按程序名搜索」的场景）
+    let aliases = std::path::Path::new(&target)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .filter(|stem| !stem.trim().is_empty() && stem != &entry.name)
+        .into_iter()
+        .collect();
     AppCandidate {
         name: entry.name,
         icon_path: (!target.is_empty()).then(|| target.clone()),
@@ -354,6 +435,7 @@ fn app_path_candidate(entry: AppPathEntry) -> AppCandidate {
         args: None,
         kind: KIND_WIN32.to_string(),
         source: SOURCE_APP_PATHS.to_string(),
+        aliases,
     }
 }
 
@@ -365,6 +447,7 @@ fn uwp_candidate(app: UwpApp) -> AppCandidate {
         icon_path: None,
         kind: KIND_UWP.to_string(),
         source: SOURCE_UWP.to_string(),
+        aliases: Vec::new(),
     }
 }
 
@@ -423,6 +506,7 @@ pub fn rows_equal(left: &[AppIndexRow], right: &[AppIndexRow]) -> bool {
             && a.kind == b.kind
             && a.source == b.source
             && a.icon_path == b.icon_path
+            && a.aliases == b.aliases
     })
 }
 
@@ -501,6 +585,7 @@ mod tests {
             icon_path: None,
             kind: kind.to_string(),
             source: source.to_string(),
+            aliases: Vec::new(),
         }
     }
 
@@ -557,13 +642,13 @@ mod tests {
         let rows = build_index(vec![
             candidate(
                 "缺失",
-                "C:\\QuickWin-Not-Exist\\missing.exe",
+                "C:\\Quick-Not-Exist\\missing.exe",
                 SOURCE_START_MENU,
                 KIND_WIN32,
             ),
             candidate(
                 "文档",
-                "C:\\QuickWin-Not-Exist\\readme.txt",
+                "C:\\Quick-Not-Exist\\readme.txt",
                 SOURCE_START_MENU,
                 KIND_WIN32,
             ),
@@ -604,7 +689,7 @@ mod tests {
     #[allow(non_snake_case)]
     fn 排序按来源优先级再按名称() {
         let unique = format!(
-            "quickwin-appindex-{}-{}",
+            "quick-appindex-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -663,7 +748,18 @@ mod tests {
             kind: "win32".to_string(),
             source: "start_menu".to_string(),
             icon_path: None,
+            aliases: Vec::new(),
         }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 别名变化会被识别为索引变化() {
+        let base = vec![app_test_row("a.exe", "Alpha")];
+        let mut changed = base.clone();
+        changed[0].aliases = vec!["Alias".to_string()];
+        assert!(!rows_equal(&base, &changed));
+        assert!(rows_equal(&base, &base));
     }
 
     #[test]
@@ -696,7 +792,7 @@ mod tests {
             println!("skip: no data dir");
             return;
         };
-        let db_path = data_dir.join("com.quickwin.app").join("quickwin.db");
+        let db_path = data_dir.join("quick").join("quick.db");
         let lock = IndexRebuildLock::default();
 
         match rebuild_index(&db_path, &lock) {

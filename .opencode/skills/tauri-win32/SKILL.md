@@ -1,6 +1,6 @@
 ---
 name: Tauri Win32
-description: 在 QuickWin 中实现或修改 Win32 相关能力（剪贴板、SendInput、前台窗口/焦点、全局热键、DPI、应用启动）时使用，含封装模板、坑位与手动测试清单。
+description: 在 Quick 中实现或修改 Win32 相关能力（剪贴板、SendInput、前台窗口/焦点、全局热键、DPI、应用启动）时使用，含封装模板、坑位与手动测试清单。
 ---
 
 # Win32 实现规范

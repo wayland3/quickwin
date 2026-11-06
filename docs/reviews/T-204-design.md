@@ -58,9 +58,9 @@
    }
    ```
    已验证：Tauri 2.12 `AssetProtocolConfig` 为 `{ scope, enable }`（camelCase）；`$APPDATA` 是 Tauri 支持的作用域变量；
-   Tauri `app_data_dir()` = `dirs::data_dir()/identifier` = `%APPDATA%\com.quickwin.app`（**已含 identifier**），
-   而 blob 落盘在 `%APPDATA%\com.quickwin.app\blobs\...`，所以 scope 只能是 `$APPDATA/blobs/**`。
-   写成 `$APPDATA/com.quickwin.app/blobs/**` 会双重 identifier → `is_allowed` 恒 false → 403（v4 复审阻塞 N1）。
+   Tauri `app_data_dir()` = `dirs::data_dir()/identifier` = `quick`（**已含 identifier**），
+   而 blob 落盘在 `quick/blobs/...`，所以 scope 只能是 `$APPDATA/blobs/**`。
+   写成 `quick/blobs/**` 会双重 identifier → `is_allowed` 恒 false → 403（v4 复审阻塞 N1）。
 3. **Cargo feature**：按 v4 阻塞修复 B1 开启 `protocol-asset`。
 4. **capability 放行**：先按 `"core:default"` 实现，`tauri build` / dev 启动时用 Tauri 的 schema 校验；
    若报权限缺失，按报错补**最小**权限，不整包放行。已核实 `convertFileSrc()` 走

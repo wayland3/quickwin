@@ -151,7 +151,20 @@ impl OverlayManager {
 
         // 显示窗口
         window.show()?;
-        let _ = window.set_focus();
+        
+        // Linux 上需要延迟设置焦点，避免窗口管理器立即切换焦点
+        #[cfg(target_os = "linux")]
+        {
+            let window_clone = window.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let _ = window_clone.set_focus();
+            });
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = window.set_focus();
+        }
 
         // 更新状态
         let reduced_motion = self.prefers_reduced_motion_reduced();

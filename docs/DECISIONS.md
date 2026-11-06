@@ -284,7 +284,7 @@
 
 **状态**：已采纳（T-204）
 
-**背景**：剪贴板图片预览需要让 WebView 直接读取 `%APPDATA%\com.quickwin.app\blobs\` 下的文件。
+**背景**：剪贴板图片预览需要让 WebView 直接读取 `quick/blobs/` 下的文件。
 UI-SPEC §10 禁止 base64 内联；Tauri 2 提供 asset 自定义协议。
 
 **决策**：
@@ -297,7 +297,7 @@ UI-SPEC §10 禁止 base64 内联；Tauri 2 提供 asset 自定义协议。
 **理由**：
 
 - `$APPDATA` 解析为 `app_data_dir()` = `dirs::data_dir()/identifier`，已经包含 identifier；
-  scope 若再写一层 `com.quickwin.app` 会双重目录，`is_allowed` 恒 false（403）。
+  scope 若再写一层 `quick` 会双重目录，`is_allowed` 恒 false（403）。
 - 不是新增 crate，只是启用既有依赖的 feature，因此不新开 ADR 之外的依赖决策。
 
 **代价**：

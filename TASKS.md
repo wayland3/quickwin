@@ -74,7 +74,7 @@
 目标：可运行的空壳。
 - `package.json` 脚本：`dev`、`build`、`typecheck`、`lint`、`test`、`rust:fmt`、`rust:clippy`、`rust:test`、`verify`、`tauri:dev`、`tauri:build`
 - `src-tauri/Cargo.toml`：edition 2021，依赖见 `docs/ARCHITECTURE.md` 第 2 节
-- `tauri.conf.json`：`productName=QuickWin`、`identifier=com.quickwin.app`、窗口隐藏启动、`withGlobalTauri=false`
+- `tauri.conf.json`：`productName=Quick`、`identifier=quick`、窗口隐藏启动、`withGlobalTauri=false`
 - 前端：React 19 + TS strict + Vite + Tailwind，`App.tsx` 显示占位
 - `capabilities/default.json` 只开放当前需要的权限
 
@@ -96,7 +96,7 @@
 目标：让 `verify` 真正能拦住问题。
 - ESLint（flat config）+ Prettier；Vitest 配好 `jsdom`：已完成
 - `rustfmt.toml`：已创建（edition 2021，max_width 100）
-- `tauri-plugin-log`：写 `%APPDATA%\com.quickwin.app\logs\`，按天轮转，级别 info：已配置
+- `tauri-plugin-log`：写 `quick/logs/`，按天轮转，级别 info：已配置
 - 日志脱敏工具：`redact(text) -> "len=123"`，禁止内容入日志：已实现（services/logging.rs），含 4 个单测
 
 验收：前端 `typecheck`、`lint`、`test` 均通过；Rust `fmt`、`clippy`、`test` 均通过；质量门可用。
@@ -329,7 +329,7 @@
 
 **实现备注**：
 - 新增 `services/storage.rs`：SQLite 存储层（`ClipboardStorage`），负责迁移、去重入库、FTS 同步、blob 落盘
-- 数据库路径 `%APPDATA%\com.quickwin.app\quickwin.db`；PRAGMA：WAL / synchronous=NORMAL / busy_timeout=5000 / foreign_keys=ON
+- 数据库路径 `quick/quick.db`；PRAGMA：WAL / synchronous=NORMAL / busy_timeout=5000 / foreign_keys=ON
 - 迁移：`PRAGMA user_version` 0 → 1，建表 + 索引 + FTS5（trigram），单事务；版本高于当前时启动报错而不是跳过
 - 去重：`sha256(kind + 规范化内容)`（文本类统一换行、文件列表按路径排序），先查 hash 再决定插入或 `copy_count+1` + 刷新 `last_copied_at`；返回真实 id（`InsertOutcome::{Inserted,Updated}`）
 - 事务：`Connection::transaction()`，插入主表 + FTS + 提交在同事务内，任一步失败自动回滚

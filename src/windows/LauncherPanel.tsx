@@ -59,6 +59,14 @@ export function LauncherPanel() {
     };
   }, []);
 
+  // 选中项变化时自动滚动到可见区域
+  useEffect(() => {
+    const node = document.querySelector(`[data-index="${selected}"]`);
+    if (node && typeof node.scrollIntoView === 'function') {
+      node.scrollIntoView({ block: 'nearest' });
+    }
+  }, [selected]);
+
   useEffect(() => {
     persistedQuery = query;
     const generation = ++genRef.current;
@@ -88,7 +96,8 @@ export function LauncherPanel() {
 
   const move = (delta: number) => {
     if (items.length === 0) return;
-    const next = Math.min(Math.max(selectedRef.current + delta, 0), items.length - 1);
+    // 循环导航：第一个按上键到最后一个，最后一个按下键到第一个
+    const next = (selectedRef.current + delta + items.length) % items.length;
     selectedRef.current = next;
     setSelected(next);
   };
@@ -170,6 +179,7 @@ export function LauncherPanel() {
                   type="button"
                   role="option"
                   aria-selected={index === selected}
+                  data-index={index}
                   className="qw-row"
                   onClick={() => {
                     selectedRef.current = index;

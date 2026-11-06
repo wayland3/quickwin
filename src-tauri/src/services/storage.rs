@@ -37,7 +37,7 @@ const DETAIL_COLUMNS: &str = "id, kind, preview, text_body, html, rtf, file_list
 const PREVIEW_MAX_CHARS: usize = 512;
 
 /// 当前 schema 版本
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// v1 schema
 const SCHEMA_V1: &str = r#"
@@ -110,6 +110,15 @@ CREATE TABLE usage_stat (
 );
 "#;
 
+/// v5 schema：应用别名（同一应用多个名字，多对一）
+///
+/// Linux 上同一个应用可能来自 start_menu（desktop 文件名）与 app_paths（`Name=`），
+/// 显示名与可搜名不一致（钉钉 -> `Name=钉钉`，但文件名是 `com.alibabainc.dingtalk`）。
+/// 用 JSON 数组保存全部别名，搜索时任一命中即可。
+const SCHEMA_V5: &str = r#"
+ALTER TABLE app_index ADD COLUMN aliases TEXT;
+"#;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InsertOutcome {
     /// 新条目，附带 id
@@ -167,6 +176,19 @@ pub struct AppIndexRow {
     pub source: String,
     /// 图标位置（`path` 或 `path,index`）
     pub icon_path: Option<String>,
+    /// 别名（可搜索的其他名字，如 desktop 文件名、英文 Name）
+    pub aliases: Vec<String>,
+}
+
+/// 解析 `app_index.aliases` 列的 JSON 数组；空/NULL/非法一律返回空列表
+fn parse_aliases(raw: Option<String>) -> Vec<String> {
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    match serde_json::from_str::<Vec<String>>(&raw) {
+        Ok(list) => list,
+        Err(_) => Vec::new(),
+    }
 }
 
 /// 使用频率行（`usage_stat`）
@@ -183,10 +205,10 @@ pub struct UsageStat {
 pub struct DbPath(PathBuf);
 
 impl DbPath {
-    /// 解析默认路径：`%APPDATA%\com.quickwin.app\quickwin.db`
+    /// 解析默认路径：`quick` 数据目录下的 `quick.db`
     pub fn resolve() -> Result<Self, AppError> {
         Ok(Self(
-            ClipboardStorage::default_data_dir()?.join("quickwin.db"),
+            ClipboardStorage::default_data_dir()?.join("quick.db"),
         ))
     }
 
@@ -221,10 +243,10 @@ impl Drop for ClipboardStorage {
 
 impl ClipboardStorage {
     /// 创建生产环境存储实例    ///
-    /// 数据库位于 `%APPDATA%\com.quickwin.app\quickwin.db`，blob 位于同目录下 `blobs\`。
+    /// 数据库位于 `quick` 数据目录下的 `quick.db`，blob 位于同目录下 `blobs\`。
     pub fn new() -> Result<Self, AppError> {
         let data_dir = Self::default_data_dir()?;
-        Self::open_at(&data_dir.join("quickwin.db"))
+        Self::open_at(&data_dir.join("quick.db"))
     }
 
     /// 打开指定路径的数据库（供测试与后续迁移使用）
@@ -262,7 +284,7 @@ impl ClipboardStorage {
         static TEST_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
         let seq = TEST_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
         let data_dir =
-            std::env::temp_dir().join(format!("quickwin-test-{}-{}", std::process::id(), seq));
+            std::env::temp_dir().join(format!("quick-test-{}-{}", std::process::id(), seq));
         std::fs::create_dir_all(&data_dir)
             .map_err(|e| AppError::Storage(format!("failed to create test directory: {}", e)))?;
 
@@ -281,11 +303,11 @@ impl ClipboardStorage {
         Ok(storage)
     }
 
-    /// 默认数据目录：`%APPDATA%\com.quickwin.app`
+    /// 默认数据目录：`quick`
     fn default_data_dir() -> Result<PathBuf, AppError> {
         let app_data = dirs::data_dir()
             .ok_or_else(|| AppError::Storage("failed to get data directory".to_string()))?;
-        Ok(app_data.join("com.quickwin.app"))
+        Ok(app_data.join("quick"))
     }
 
     /// 设置连接级 PRAGMA
@@ -336,6 +358,10 @@ impl ClipboardStorage {
                 3 => {
                     self.apply_version(4, SCHEMA_V4)?;
                     log::info!("database migrated: version=4");
+                }
+                4 => {
+                    self.apply_version(5, SCHEMA_V5)?;
+                    log::info!("database migrated: version=5");
                 }
                 other => {
                     return Err(AppError::Storage(format!(
@@ -1037,8 +1063,8 @@ impl ClipboardStorage {
             let mut stmt = tx
                 .prepare(
                     "INSERT INTO app_index
-                        (key, name, target, args, kind, source, icon_path, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        (key, name, target, args, kind, source, icon_path, aliases, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 )
                 .map_err(|e| {
                     AppError::Storage(format!("failed to prepare app index insert: {}", e))
@@ -1049,6 +1075,8 @@ impl ClipboardStorage {
                 if key.is_empty() || !seen.insert(key.clone()) {
                     continue;
                 }
+                let aliases_json = serde_json::to_string(&row.aliases)
+                    .map_err(|e| AppError::Storage(format!("serialize aliases failed: {}", e)))?;
                 stmt.execute(params![
                     key,
                     row.name,
@@ -1057,6 +1085,7 @@ impl ClipboardStorage {
                     row.kind,
                     row.source,
                     row.icon_path,
+                    aliases_json,
                     updated_at
                 ])
                 .map_err(|e| AppError::Storage(format!("failed to insert app index row: {}", e)))?;
@@ -1115,7 +1144,7 @@ impl ClipboardStorage {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT key, name, target, args, kind, source, icon_path FROM app_index ORDER BY key",
+                "SELECT key, name, target, args, kind, source, icon_path, aliases FROM app_index ORDER BY key",
             )
             .map_err(|e| AppError::Storage(format!("failed to prepare app index query: {}", e)))?;
         let rows = stmt
@@ -1128,6 +1157,7 @@ impl ClipboardStorage {
                     kind: row.get(4)?,
                     source: row.get(5)?,
                     icon_path: row.get(6)?,
+                    aliases: parse_aliases(row.get(7)?),
                 })
             })
             .map_err(|e| AppError::Storage(format!("failed to query app index: {}", e)))?;
@@ -1145,7 +1175,7 @@ impl ClipboardStorage {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT key, name, target, args, kind, source, icon_path FROM app_index WHERE key = ?1",
+                "SELECT key, name, target, args, kind, source, icon_path, aliases FROM app_index WHERE key = ?1",
             )
             .map_err(|e| AppError::Storage(format!("failed to prepare app lookup: {}", e)))?;
 
@@ -1159,6 +1189,7 @@ impl ClipboardStorage {
                     kind: row.get(4)?,
                     source: row.get(5)?,
                     icon_path: row.get(6)?,
+                    aliases: parse_aliases(row.get(7)?),
                 })
             })
             .map_err(|e| AppError::Storage(format!("failed to query app lookup: {}", e)))?;
@@ -1617,7 +1648,7 @@ mod tests {
     #[allow(non_snake_case)]
     fn 同一内容复制三次只有一条记录且计数为三() {
         let mut storage = open_test_storage();
-        let entry = text_entry("QuickWin 去重测试");
+        let entry = text_entry("Quick 去重测试");
 
         let first = match storage.insert(&entry) {
             Ok(outcome) => outcome,
@@ -1697,7 +1728,7 @@ mod tests {
     #[allow(non_snake_case)]
     fn FTS能搜到三字以上子串() {
         let mut storage = open_test_storage();
-        let entry = text_entry("QuickWin 剪贴板历史测试");
+        let entry = text_entry("Quick 剪贴板历史测试");
 
         match storage.insert(&entry) {
             Ok(_) => {}
@@ -1706,7 +1737,7 @@ mod tests {
 
         // trigram 分词：≥3 字可命中子串
         assert_eq!(search_fts(&storage, "\"剪贴板历\""), 1);
-        assert_eq!(search_fts(&storage, "\"QuickWin\""), 1);
+        assert_eq!(search_fts(&storage, "\"Quick\""), 1);
     }
 
     #[test]
@@ -1806,14 +1837,14 @@ mod tests {
     #[allow(non_snake_case)]
     fn 图片写入blob并记录路径() {
         let unique = format!(
-            "quickwin-test-{}-{}",
+            "quick-test-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         );
-        let db_path = std::env::temp_dir().join(unique).join("quickwin.db");
+        let db_path = std::env::temp_dir().join(unique).join("quick.db");
 
         let mut storage = match ClipboardStorage::open_at(&db_path) {
             Ok(storage) => storage,
@@ -2166,9 +2197,9 @@ mod tests {
     #[test]
     #[allow(non_snake_case)]
     fn 只读打开未迁移的库会先建表() {
-        let dir = std::env::temp_dir().join(format!("quickwin-readonly-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("quick-readonly-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let db_path = dir.join("quickwin.db");
+        let db_path = dir.join("quick.db");
 
         let storage = match ClipboardStorage::open_readonly_at(&db_path) {
             Ok(storage) => storage,
@@ -2300,14 +2331,14 @@ mod tests {
     #[allow(non_snake_case)]
     fn v1库迁移到最新版本后剪贴板数据保留() {
         let unique = format!(
-            "quickwin-migrate-v2-{}-{}",
+            "quick-migrate-v2-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         );
-        let db_path = std::env::temp_dir().join(unique).join("quickwin.db");
+        let db_path = std::env::temp_dir().join(unique).join("quick.db");
 
         // 用普通连接手工建 v1 库（不走 open_at，否则会直接迁移到最新版）
         let dir_path = db_path.parent().expect("db parent");
@@ -2390,6 +2421,7 @@ mod tests {
             kind: "win32".to_string(),
             source: "start_menu".to_string(),
             icon_path: None,
+            aliases: Vec::new(),
         }
     }
 
@@ -2397,14 +2429,14 @@ mod tests {
     #[allow(non_snake_case)]
     fn v2库迁移到v3后设置与剪贴板数据保留() {
         let unique = format!(
-            "quickwin-migrate-v3-{}-{}",
+            "quick-migrate-v3-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         );
-        let db_path = std::env::temp_dir().join(unique).join("quickwin.db");
+        let db_path = std::env::temp_dir().join(unique).join("quick.db");
 
         let dir_path = db_path.parent().expect("db parent");
         std::fs::create_dir_all(dir_path).expect("create db dir");
@@ -2582,14 +2614,14 @@ mod tests {
     #[allow(non_snake_case)]
     fn v3库迁移到v4后应用索引保留() {
         let unique = format!(
-            "quickwin-migrate-v4-{}-{}",
+            "quick-migrate-v4-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         );
-        let db_path = std::env::temp_dir().join(unique).join("quickwin.db");
+        let db_path = std::env::temp_dir().join(unique).join("quick.db");
 
         let dir_path = db_path.parent().expect("db parent");
         std::fs::create_dir_all(dir_path).expect("create db dir");
@@ -2637,6 +2669,55 @@ mod tests {
 
     #[test]
     #[allow(non_snake_case)]
+    fn v4库迁移到v5后应用索引保留且别名列为空() {
+        let unique = format!(
+            "quick-migrate-v5-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let db_path = std::env::temp_dir().join(unique).join("quick.db");
+
+        let dir_path = db_path.parent().expect("db parent");
+        std::fs::create_dir_all(dir_path).expect("create db dir");
+        let v4_conn = rusqlite::Connection::open(&db_path).expect("open v4 connection");
+        for schema in [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4] {
+            v4_conn.execute_batch(schema).expect("apply schema");
+        }
+        v4_conn
+            .pragma_update(None, "user_version", 4)
+            .expect("set v4 version");
+        v4_conn
+            .execute(
+                "INSERT INTO app_index (key, name, target, kind, source, updated_at)
+                 VALUES ('a.exe', 'Alpha', 'a.exe', 'win32', 'start_menu', 1000)",
+                [],
+            )
+            .expect("insert app row");
+        drop(v4_conn);
+
+        let storage = ClipboardStorage::open_at(&db_path).expect("migrate to v5");
+        let version_after: i64 = storage
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("read migrated version");
+        assert_eq!(version_after, SCHEMA_VERSION);
+
+        // 旧行保留，新增的 aliases 列为 NULL → 解析为空列表
+        let apps = storage.load_app_index().expect("load app index");
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].key, "a.exe");
+        assert!(apps[0].aliases.is_empty());
+
+        if let Some(dir) = db_path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
     fn 使用频率累加且刷新时间() {
         let mut storage = open_test_storage();
         storage
@@ -2659,14 +2740,14 @@ mod tests {
         use std::thread;
 
         let unique = format!(
-            "quickwin-concurrent-{}-{}",
+            "quick-concurrent-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         );
-        let db_path = std::env::temp_dir().join(unique).join("quickwin.db");
+        let db_path = std::env::temp_dir().join(unique).join("quick.db");
 
         // 先初始化 schema，避免多个线程同时对空库迁移
         let initializer = match ClipboardStorage::open_at(&db_path) {
@@ -2879,14 +2960,14 @@ mod tests {
     #[allow(non_snake_case)]
     fn blob超预算淘汰最旧图片并删文件() {
         let unique = format!(
-            "quickwin-blob-budget-{}-{}",
+            "quick-blob-budget-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         );
-        let db_path = std::env::temp_dir().join(unique).join("quickwin.db");
+        let db_path = std::env::temp_dir().join(unique).join("quick.db");
         let mut storage = match ClipboardStorage::open_at(&db_path) {
             Ok(s) => s,
             Err(e) => panic!("open failed: {}", e),
@@ -2984,14 +3065,14 @@ mod tests {
     #[allow(non_snake_case)]
     fn 孤儿blob只回收过期文件() {
         let unique = format!(
-            "quickwin-orphan-{}-{}",
+            "quick-orphan-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         );
-        let db_path = std::env::temp_dir().join(unique).join("quickwin.db");
+        let db_path = std::env::temp_dir().join(unique).join("quick.db");
         let mut storage = match ClipboardStorage::open_at(&db_path) {
             Ok(s) => s,
             Err(e) => panic!("open failed: {}", e),
@@ -3044,14 +3125,14 @@ mod tests {
     #[allow(non_snake_case)]
     fn blob预算按磁盘实际占用判定() {
         let unique = format!(
-            "quickwin-blob-disk-{}-{}",
+            "quick-blob-disk-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         );
-        let db_path = std::env::temp_dir().join(unique).join("quickwin.db");
+        let db_path = std::env::temp_dir().join(unique).join("quick.db");
         let mut storage = match ClipboardStorage::open_at(&db_path) {
             Ok(s) => s,
             Err(e) => panic!("open failed: {}", e),
@@ -3104,14 +3185,14 @@ mod tests {
     #[allow(non_snake_case)]
     fn 全部清空后blobs目录为空() {
         let unique = format!(
-            "quickwin-clear-blobs-{}-{}",
+            "quick-clear-blobs-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         );
-        let db_path = std::env::temp_dir().join(unique).join("quickwin.db");
+        let db_path = std::env::temp_dir().join(unique).join("quick.db");
         let mut storage = match ClipboardStorage::open_at(&db_path) {
             Ok(s) => s,
             Err(e) => panic!("open failed: {}", e),

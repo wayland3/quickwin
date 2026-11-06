@@ -169,7 +169,7 @@ physical_y = rcWork.top + (rcWork.height * 0.2)
 
 - `.lnk` 解析用 COM `IShellLinkW`（`CoInitializeEx` 在专用线程，注意 STA/MTA）或成熟的 lnk 解析 crate（新增依赖需 ADR）。
 - 优先取 `GetPath`，空则跳过（可能是 UWP 或 MSI 广告快捷方式）。
-- 图标：`ExtractIconExW` 或 `SHGetFileInfoW`，缓存到 `%APPDATA%\com.quickwin.app\icons\<hash>.png`，避免每次读 exe。
+- 图标：`ExtractIconExW` 或 `SHGetFileInfoW`，缓存到 `quick/icons/<hash>.png`，避免每次读 exe。
 
 ### 7.2 启动
 
@@ -189,7 +189,7 @@ physical_y = rcWork.top + (rcWork.height * 0.2)
 - 不注入其他进程、不写 `AppInit_DLLs`、不做键盘钩子、不读其他进程内存。
 - 开机自启走 Tauri autostart（注册表 `Run` 键由插件管理），不手写注册表。
 - 剪贴板内容不落日志、不进崩溃上报；数据库本地明文，并在 UI 明确告知。
-- 提权相关：默认以当前用户权限运行；提示用户「以管理员运行 QuickWin 可支持高权限窗口」，但不默认开启。
+- 提权相关：默认以当前用户权限运行；提示用户「以管理员运行 Quick 可支持高权限窗口」，但不默认开启。
 - 安装包未签名时 SmartScreen 会提示，属预期；发布前评估签名。
 
 ## 9. 其他坑位

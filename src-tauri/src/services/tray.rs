@@ -22,7 +22,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), AppError> {
     TrayIconBuilder::new()
         .icon(icon)
         .menu(&menu)
-        .tooltip("QuickWin")
+        .tooltip("Quick")
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, event| {
             let result: Result<(), AppError> = match event.id.as_ref() {
@@ -76,7 +76,7 @@ fn show_settings(app: &AppHandle) -> Result<(), AppError> {
             .map_err(|error| AppError::Internal(format!("failed to load tray icon: {}", error)))?;
 
         match tauri::WebviewWindowBuilder::new(app, "settings", tauri::WebviewUrl::default())
-            .title("QuickWin 设置")
+            .title("Quick 设置")
             .icon(icon)?
             .inner_size(880.0, 600.0)
             .min_inner_size(720.0, 520.0)

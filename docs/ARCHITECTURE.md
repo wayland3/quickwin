@@ -223,7 +223,7 @@ WHERE pinned = 0 AND last_copied_at < ?1;
 
 ### 5.5 数据管理
 
-- 库文件：`%APPDATA%\com.quickwin.app\quickwin.db`；附件：`blobs\<xx>\<hash>.<ext>`。
+- 库文件：`quick/quick.db`；附件：`blobs\<xx>\<hash>.<ext>`。
 - 时间统一存 Unix 毫秒（`INTEGER`）；展示层再做本地化。
 - 删除类操作（清空历史、删除条目）必须同步清理 FTS 行与 blob 文件。
 - 迁移测试：内置 v1 空库 fixture；后续每个版本补一条「vN 数据 → 最新」测试。
@@ -449,7 +449,7 @@ pub enum AppError {
 
 ## 12. 日志与隐私
 
-- 位置：`%APPDATA%\com.quickwin.app\logs\quickwin.YYYY-MM-DD.log`，保留 7 天。
+- 位置：`quick/logs/quick.YYYY-MM-DD.log`，保留 7 天。
 - 级别：release 默认 `info`；`--verbose` 启动为 `debug`。
 - 允许记录：命令名、耗时、条目 id、类型、长度、错误码、窗口类名。
 - 禁止记录：剪贴板内容、窗口标题、文件路径、URL 查询串。

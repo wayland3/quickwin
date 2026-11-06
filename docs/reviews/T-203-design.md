@@ -34,7 +34,7 @@ pub struct ClipboardStorage {
 
 impl ClipboardStorage {
     pub fn new() -> Result<Self, AppError> {
-        // 打开数据库（%APPDATA%/com.quickwin.app/quickwin.db）
+        // 打开数据库（quick/quick.db）
         // 设置 PRAGMA：WAL、NORMAL、busy_timeout=5000、foreign_keys=ON
         // 检查 user_version，执行迁移（v0 → v1）
         // 启动时一致性检查：对比主表与 FTS 表行数，差异时重建 FTS

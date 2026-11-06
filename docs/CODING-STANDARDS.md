@@ -1,6 +1,6 @@
 # 编码规范
 
-本文档定义 QuickWin 的编码规范，写代码前必读。
+本文档定义 Quick 的编码规范，写代码前必读。
 
 ## 1. Rust
 
@@ -27,7 +27,7 @@
 
 ## 4. 数据与迁移
 
-- 库文件：`%APPDATA%\com.quickwin.app\quickwin.db`；附件：`blobs\<xx>\<hash>.<ext>`。
+- 库文件：`quick/quick.db`；附件：`blobs\<xx>\<hash>.<ext>`。
 - `PRAGMA journal_mode=WAL`、`synchronous=NORMAL`、`busy_timeout=5000`、`foreign_keys=ON`。
 - 版本：`PRAGMA user_version`，迁移函数数组顺序执行，单次迁移必须在事务内。
 - 迁移测试：内置 v1 空库 fixture；后续每个版本补一条「vN 数据 → 最新」测试。

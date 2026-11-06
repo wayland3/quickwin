@@ -1,4 +1,4 @@
-# QuickWin 功能与 UI 规格
+# Quick 功能与 UI 规格
 
 > 合并自 PRD.md + UI-SPEC.md。按功能组织，每个功能包含行为 + UI。
 > 实现方式见 `ARCHITECTURE.md`，Win32 细节见 `WIN32-NOTES.md`。

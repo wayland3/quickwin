@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicegui/nicegui/main/tauri/schema.json",
-  "productName": "QuickWin",
+  "productName": "Quick",
   "version": "0.1.0",
-  "identifier": "com.quickwin.app",
+  "identifier": "quick",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "withGlobalTauri": false,
     "windows": [
       {
-        "title": "QuickWin",
+        "title": "Quick",
         "label": "overlay",
         "width": 600,
         "height": 400,
@@ -38,6 +38,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.ico"]
+    "icon": ["icons/icon.png", "icons/icon.ico"]
   }
 }

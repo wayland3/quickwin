@@ -1,8 +1,8 @@
 ---
-description: 运行 QuickWin 质量门（typecheck / lint / test / rust fmt / clippy / test）并输出报告
+description: 运行 Quick 质量门（typecheck / lint / test / rust fmt / clippy / test）并输出报告
 ---
 
-对当前改动运行 QuickWin 的质量门，逐项执行并把结果汇总成表格。
+对当前改动运行 Quick 的质量门，逐项执行并把结果汇总成表格。
 
 根据改动范围选择合适的质量门：
 
@@ -47,5 +47,5 @@ description: 运行 QuickWin 质量门（typecheck / lint / test / rust fmt / cl
 附加检查（若本次改动涉及）：
 
 - 涉及 schema：是否新增 migration + 迁移测试。
-- 涉及 `platform/`：是否记录了 Win32 手测结果。
+- 涉及 `platform/`：是否记录了平台特定 API 手测结果。
 - 涉及 UI：是否有空态/错误态。

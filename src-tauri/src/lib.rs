@@ -34,9 +34,9 @@ pub fn run() {
                     tauri_plugin_log::TargetKind::Folder {
                         path: dirs::data_local_dir()
                             .unwrap_or_else(|| std::path::PathBuf::from("."))
-                            .join("com.quickwin.app")
+                            .join("quick")
                             .join("logs"),
-                        file_name: Some("quickwin".to_string()),
+                        file_name: Some("quick".to_string()),
                     },
                 ))
                 .level(log::LevelFilter::Info)
@@ -84,7 +84,7 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            log::info!("QuickWin starting");
+            log::info!("Quick starting");
             services::tray::setup_tray(app.handle())?;
 
             // 数据库路径必须最先就绪：启动注册热键/自启对账都要读 settings
