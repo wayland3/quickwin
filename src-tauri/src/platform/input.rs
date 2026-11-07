@@ -35,16 +35,20 @@ pub fn send_copy() -> Result<(), AppError> {
     }
 }
 
-/// 发送 Ctrl+V
-pub fn send_paste() -> Result<(), AppError> {
+/// 发送粘贴快捷键
+///
+/// `process_name` 用于检测目标窗口是否为终端，以选择合适的粘贴快捷键。
+/// Linux 终端通常使用 `Ctrl+Shift+V`，其他应用使用 `Ctrl+V`。
+pub fn send_paste(process_name: Option<&str>) -> Result<(), AppError> {
     #[cfg(target_os = "windows")]
     {
+        let _ = process_name; // Windows 终端一般支持 Ctrl+V，暂不需要特殊处理
         send_paste_windows()
     }
 
     #[cfg(target_os = "linux")]
     {
-        send_paste_linux()
+        send_paste_linux(process_name)
     }
 }
 
@@ -221,8 +225,84 @@ mod linux_impl {
         send_key_combo(Key::Control, Key::Unicode('c'))
     }
 
-    pub fn send_paste_linux() -> Result<(), AppError> {
-        send_key_combo(Key::Control, Key::Unicode('v'))
+    pub fn send_paste_linux(process_name: Option<&str>) -> Result<(), AppError> {
+        // Linux 终端通常使用 Ctrl+Shift+V 粘贴，而非 Ctrl+V
+        let is_term = is_terminal(process_name);
+        log::info!(
+            "send_paste_linux: process_name={:?}, is_terminal={}",
+            process_name,
+            is_term
+        );
+        if is_term {
+            send_key_combo_with_two_modifiers(Key::Control, Key::Shift, Key::Unicode('v'))
+        } else {
+            send_key_combo(Key::Control, Key::Unicode('v'))
+        }
+    }
+
+    /// 检测进程名是否为终端模拟器
+    fn is_terminal(process_name: Option<&str>) -> bool {
+        let Some(name) = process_name else {
+            return false;
+        };
+        let name_lower = name.to_lowercase();
+        // 常见 Linux 终端模拟器进程名
+        matches!(
+            name_lower.as_str(),
+            "gnome-terminal"
+                | "gnome-terminal-" // gnome-terminal-server
+                | "konsole"
+                | "alacritty"
+                | "kitty"
+                | "xterm"
+                | "uxterm"
+                | "wezterm"
+                | "wezterm-gui"
+                | "terminator"
+                | "tilix"
+                | "xfce4-terminal"
+                | "lxterminal"
+                | "mate-terminal"
+                | "st" // suckless terminal
+                | "foot"
+                | "sakura"
+                | "terminology"
+                | "guake"
+                | "yakuake"
+        )
+    }
+
+    fn send_key_combo_with_two_modifiers(
+        modifier1: Key,
+        modifier2: Key,
+        key: Key,
+    ) -> Result<(), AppError> {
+        let mut guard = get_enigo()?;
+        let enigo = guard
+            .as_mut()
+            .ok_or(AppError::Internal("enigo not initialized".into()))?;
+
+        enigo
+            .key(modifier1, Direction::Press)
+            .map_err(|e| AppError::Internal(format!("modifier1 press failed: {}", e)))?;
+
+        enigo
+            .key(modifier2, Direction::Press)
+            .map_err(|e| AppError::Internal(format!("modifier2 press failed: {}", e)))?;
+
+        enigo
+            .key(key, Direction::Click)
+            .map_err(|e| AppError::Internal(format!("key click failed: {}", e)))?;
+
+        enigo
+            .key(modifier2, Direction::Release)
+            .map_err(|e| AppError::Internal(format!("modifier2 release failed: {}", e)))?;
+
+        enigo
+            .key(modifier1, Direction::Release)
+            .map_err(|e| AppError::Internal(format!("modifier1 release failed: {}", e)))?;
+
+        Ok(())
     }
 
     fn send_key_combo(modifier: Key, key: Key) -> Result<(), AppError> {

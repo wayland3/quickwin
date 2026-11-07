@@ -151,7 +151,7 @@ impl OverlayManager {
 
         // 显示窗口
         window.show()?;
-        
+
         // Linux 上需要延迟设置焦点，避免窗口管理器立即切换焦点
         #[cfg(target_os = "linux")]
         {

@@ -185,10 +185,7 @@ fn parse_aliases(raw: Option<String>) -> Vec<String> {
     let Some(raw) = raw else {
         return Vec::new();
     };
-    match serde_json::from_str::<Vec<String>>(&raw) {
-        Ok(list) => list,
-        Err(_) => Vec::new(),
-    }
+    serde_json::from_str::<Vec<String>>(&raw).unwrap_or_default()
 }
 
 /// 使用频率行（`usage_stat`）
@@ -207,9 +204,7 @@ pub struct DbPath(PathBuf);
 impl DbPath {
     /// 解析默认路径：`quick` 数据目录下的 `quick.db`
     pub fn resolve() -> Result<Self, AppError> {
-        Ok(Self(
-            ClipboardStorage::default_data_dir()?.join("quick.db"),
-        ))
+        Ok(Self(ClipboardStorage::default_data_dir()?.join("quick.db")))
     }
 
     /// 由外部路径构造（测试与将来迁移用）

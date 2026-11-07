@@ -125,13 +125,14 @@ pub fn activate(
     // 焦点恢复后给系统一点时间完成前台激活，再发送按键
     std::thread::sleep(std::time::Duration::from_millis(30));
 
-    if let Err(e) = send_paste() {
-        log::info!("paste: send_ctrl_v failed: {}", e);
+    let target_process = prev.as_ref().map(|w| w.process_name.as_str());
+    if let Err(e) = send_paste(target_process) {
+        log::info!("paste: send_paste failed: {}", e);
         resume_and_toast(app, manager, &window, "已复制，请手动粘贴");
         return Ok(());
     }
 
-    log::info!("paste: sent ctrl+v");
+    log::info!("paste: sent paste keystroke");
 
     if let Some((snapshot, snapshot_hash)) = snapshot {
         schedule_restore(
