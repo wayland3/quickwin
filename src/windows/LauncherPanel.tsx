@@ -6,9 +6,6 @@ const DEBOUNCE_MS = 80;
 const HINT_MS = 3000;
 const EMPTY_QUERY_PLACEHOLDER = '搜索应用';
 
-/** 启动器查询词跨隐藏保留（SPEC §4：启动器保留上一次查询） */
-let persistedQuery = '';
-
 function errorMessage(err: unknown, fallback = '搜索失败，请稍后重试'): string {
   if (err && typeof err === 'object' && 'message' in err) {
     const message = (err as { message: unknown }).message;
@@ -29,7 +26,7 @@ function groupLabel(kind: LauncherItem['kind']): string {
 }
 
 export function LauncherPanel() {
-  const [query, setQuery] = useState(persistedQuery);
+  const [query, setQuery] = useState('');
   const [items, setItems] = useState<LauncherItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -68,7 +65,6 @@ export function LauncherPanel() {
   }, [selected]);
 
   useEffect(() => {
-    persistedQuery = query;
     const generation = ++genRef.current;
     const timer = window.setTimeout(() => {
       setLoading(true);
